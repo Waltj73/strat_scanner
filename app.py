@@ -1,4 +1,4 @@
-# app.py
+# app.py — STRAT Regime Scanner V1
 import math
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
@@ -11,20 +11,20 @@ import yfinance as yf
 # =========================
 # STREAMLIT CONFIG + NAV
 # =========================
-st.set_page_config(page_title="STRAT Regime Scanner", layout="wide")
+st.set_page_config(page_title="STRAT Regime Scanner V1", layout="wide")
 page = st.sidebar.radio("Navigation", ["Scanner", "📘 User Guide"])
 
 # =========================
 # USER GUIDE PAGE
 # =========================
 def show_user_guide():
-    st.title("📘 STRAT Regime Scanner — User Guide")
+    st.title("📘 STRAT Regime Scanner — User Guide (V1)")
 
     st.markdown("""
 ## What this scanner does
 This scanner gives you:
 - **Overall market bias** (LONG / SHORT / MIXED)
-- **Sector rotation** (where money is flowing)
+- **Sector/Metals rotation** (where money is flowing)
 - **Ranked trade ideas** with **Entry / Stop / RR / ATR%**
 - A “**Trade of the Day**” when a valid trigger exists
 
@@ -57,12 +57,19 @@ Weekly triggers are better than daily when available.
 
 ---
 
+## Why some rows show blank Entry/Stop/RR
+Those columns fill only when a **Daily or Weekly Inside Bar** exists.
+No inside bar = **no trigger yet** (the scanner is telling you to wait).
+
+---
+
 ## Quick routine (2–5 min)
-1) Bias + strength
-2) Top sectors
-3) Drill down
-4) Pick 1–3 names with valid triggers
-5) Confirm on chart, then place trigger orders
+1) Bias + strength  
+2) Rotation IN + Rotation OUT  
+3) Pick the strongest (or weakest) 1–3 groups  
+4) Drill down  
+5) Choose 1–3 names with valid triggers  
+6) Confirm chart sanity, then place trigger orders
 """)
 
 if page == "📘 User Guide":
@@ -72,7 +79,7 @@ if page == "📘 User Guide":
 # =========================
 # UI CONTROLS
 # =========================
-st.title("STRAT Regime Scanner (Auto LONG/SHORT + Magnitude)")
+st.title("STRAT Regime Scanner (Auto LONG/SHORT + Magnitude) — V1")
 st.caption("Bias from market regime. Ranks tickers by setup quality AND magnitude (RR + ATR% + compression).")
 
 with st.expander("Filters", expanded=True):
@@ -105,6 +112,15 @@ MARKET_ETFS = {
     "Dow Jones": "DIA",
 }
 
+# Metals (added)
+METALS_ETFS = {
+    "Metals - Gold": "GLD",
+    "Metals - Silver": "SLV",
+    "Metals - Copper": "CPER",
+    "Metals - Platinum": "PPLT",
+    "Metals - Palladium": "PALL",
+}
+
 SECTOR_ETFS = {
     "Energy": "XLE",
     "Comm Services": "XLC",
@@ -117,8 +133,10 @@ SECTOR_ETFS = {
     "Financials": "XLF",
     "Technology": "XLK",
     "Health Care": "XLV",
+    **METALS_ETFS,  # ✅ metals now show up in sector table + rotation
 }
 
+# Stock lists per group for drilldown
 SECTOR_TICKERS: Dict[str, List[str]] = {
     "Energy": ["XOM","CVX","COP","EOG","SLB","HAL","PSX","MPC","VLO","OXY","KMI","WMB","BKR","DVN","PXD"],
     "Comm Services": ["GOOGL","GOOG","META","NFLX","TMUS","VZ","T","DIS","CMCSA","CHTR","EA","TTWO","SPOT","ROKU","SNAP"],
@@ -131,6 +149,13 @@ SECTOR_TICKERS: Dict[str, List[str]] = {
     "Financials": ["BRK-B","JPM","BAC","WFC","GS","MS","C","BLK","SCHW","AXP","SPGI","ICE","CME","PNC","TFC"],
     "Technology": ["AAPL","MSFT","NVDA","AVGO","CRM","ORCL","ADBE","AMD","CSCO","INTC","QCOM","TXN","NOW","AMAT","MU"],
     "Health Care": ["UNH","JNJ","LLY","PFE","MRK","ABBV","TMO","ABT","DHR","BMY","AMGN","GILD","ISRG","VRTX","MDT"],
+
+    # Metals drilldown (ETFs themselves)
+    "Metals - Gold": ["GLD"],
+    "Metals - Silver": ["SLV"],
+    "Metals - Copper": ["CPER"],
+    "Metals - Platinum": ["PPLT"],
+    "Metals - Palladium": ["PALL"],
 }
 
 REQUIRED_COLS = ["Open", "High", "Low", "Close", "Volume"]
@@ -155,7 +180,7 @@ def _ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
 def _dedupe_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     Ensure unique columns. If duplicates exist, keep first occurrence.
-    This prevents df['Open'] returning a DataFrame (which breaks pd.to_numeric).
+    Prevents df['Open'] returning a DataFrame (breaks pd.to_numeric).
     """
     if df is None or df.empty:
         return pd.DataFrame()
@@ -171,7 +196,7 @@ def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
-    # MultiIndex handling
+    # MultiIndex handling (common on cloud)
     if isinstance(df.columns, pd.MultiIndex):
         lvl0 = df.columns.get_level_values(0)
         lvl1 = df.columns.get_level_values(1)
@@ -212,7 +237,6 @@ def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
                 df["Close"] = df[alt]
                 break
 
-    # Ensure Volume exists
     if "Volume" not in df.columns:
         df["Volume"] = 0
 
@@ -221,11 +245,10 @@ def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     df = df[needed].copy()
-    df = _dedupe_columns(df)  # ✅ critical
+    df = _dedupe_columns(df)
 
-    # Force numeric
+    # Force numeric safely
     for c in needed:
-        # If somehow duplicates still slipped through, collapse to first column
         if c in df.columns and isinstance(df[c], pd.DataFrame):
             df[c] = df[c].iloc[:, 0]
         df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -255,14 +278,12 @@ def resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     df = _ensure_datetime_index(df)
-    df = _dedupe_columns(df)  # ✅ prevents duplicate 'Open' etc.
-
+    df = _dedupe_columns(df)
     if df.empty:
         return pd.DataFrame()
 
     for c in ["Open", "High", "Low", "Close", "Volume"]:
         if c in df.columns:
-            # If duplicate columns somehow exist, collapse
             if isinstance(df[c], pd.DataFrame):
                 df[c] = df[c].iloc[:, 0]
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -433,8 +454,14 @@ def best_trigger(bias: str, d: pd.DataFrame, w: pd.DataFrame) -> Tuple[Optional[
 
     return None, None, None
 
-def magnitude_metrics(bias: str, d: pd.DataFrame, entry: Optional[float], stop: Optional[float]) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
-    if entry is None or stop is None or d is None or d.empty or len(d) < 80:
+def magnitude_metrics(
+    bias: str,
+    d: pd.DataFrame,
+    entry: Optional[float],
+    stop: Optional[float]
+) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    # ATR% can still be computed even without triggers (but we keep RR/room tied to triggers)
+    if d is None or d.empty or len(d) < 80:
         return None, None, None, None
 
     close = float(d["Close"].iloc[-1])
@@ -443,6 +470,10 @@ def magnitude_metrics(bias: str, d: pd.DataFrame, entry: Optional[float], stop: 
         return None, None, None, None
 
     atrp = (atr / close) * 100.0
+
+    if entry is None or stop is None:
+        return None, atrp, None, None
+
     hi63 = float(d["High"].rolling(63).max().iloc[-1])
     lo63 = float(d["Low"].rolling(63).min().iloc[-1])
 
@@ -558,7 +589,7 @@ market_df = pd.DataFrame(market_rows)[[
 st.dataframe(market_df, use_container_width=True, hide_index=True)
 
 # =========================
-# BUILD SECTOR TABLE
+# BUILD SECTOR/METALS TABLE
 # =========================
 sector_rows: List[Dict] = []
 for sector, etf in SECTOR_ETFS.items():
@@ -588,7 +619,7 @@ else:
     sectors_df["Dominance"] = (sectors_df["BullScore"] - sectors_df["BearScore"]).abs()
     sectors_df = sectors_df.sort_values("Dominance", ascending=False)
 
-st.subheader("Sectors (SPDR) — ranked after bias is known")
+st.subheader("Sectors + Metals — ranked after bias is known")
 st.dataframe(
     sectors_df[[
         "Sector","ETF","BullScore","BearScore",
@@ -603,13 +634,13 @@ st.dataframe(
 # =========================
 # DRILLDOWN: TOP NAMES
 # =========================
-st.subheader("Drill into a sector (ranks candidates in bias direction + magnitude)")
+st.subheader("Drill into a group (ranks candidates in bias direction + magnitude)")
 
-sector_choice = st.selectbox("Choose a sector:", options=list(SECTOR_TICKERS.keys()), index=0)
+sector_choice = st.selectbox("Choose a sector/metals group:", options=list(SECTOR_TICKERS.keys()), index=0)
 tickers = SECTOR_TICKERS.get(sector_choice, [])
 st.write(f"Selected: **{sector_choice}** ({SECTOR_ETFS.get(sector_choice,'')}) — tickers in list: **{len(tickers)}**")
 
-scan_n = st.slider("How many tickers to scan", min_value=5, max_value=len(tickers), value=min(15, len(tickers)))
+scan_n = st.slider("How many tickers to scan", min_value=1, max_value=len(tickers), value=min(15, len(tickers)))
 scan_list = tickers[:scan_n]
 
 cand_rows: List[Dict] = []
@@ -639,8 +670,11 @@ for t in scan_list:
     rr, atrp, room, compression = magnitude_metrics(eff_bias, d_tf, entry, stop)
     setup_score, mag_score, total_score = calc_scores(eff_bias, flags, rr, atrp, compression, entry, stop)
 
+    trigger_status = "READY" if (flags["W_Inside"] or flags["D_Inside"]) else "WAIT (No Inside Bar)"
+
     cand = {
         "Ticker": t,
+        "TriggerStatus": trigger_status,
         "SetupScore": setup_score,
         "MagScore": mag_score,
         "TotalScore": total_score,
@@ -662,7 +696,7 @@ else:
 
     st.markdown(f"### Top Trade Ideas (best {top_k}) — Bias: **{bias}** (ranked by TotalScore)")
     top_df = cand_df.head(top_k)[[
-        "Ticker","TotalScore","SetupScore","MagScore","TF","Entry","Stop","Room","RR","ATR%",
+        "Ticker","TriggerStatus","TotalScore","SetupScore","MagScore","TF","Entry","Stop","Room","RR","ATR%",
         "W_212Up","D_212Up","M_Bull","W_Bull","D_Bull","W_Inside","D_Inside",
         "W_212Dn","D_212Dn","M_Bear","W_Bear","D_Bear"
     ]]
@@ -684,7 +718,7 @@ else:
     st.markdown("### All Matches (ranked by TotalScore)")
     st.dataframe(
         cand_df[[
-            "Ticker","SetupScore","MagScore","TotalScore","TF","Entry","Stop","Room","RR","ATR%",
+            "Ticker","TriggerStatus","SetupScore","MagScore","TotalScore","TF","Entry","Stop","Room","RR","ATR%",
             "W_Inside","D_Inside","W_212Up","D_212Up","W_212Dn","D_212Dn",
             "M_Bull","W_Bull","D_Bull","M_Bear","W_Bear","D_Bear"
         ]],
@@ -693,32 +727,42 @@ else:
     )
 
 # =========================
-# QUICK MARKET READ
+# QUICK MARKET READ (Rotation IN + Rotation OUT)
 # =========================
 st.subheader("Quick Market Read")
 
-if bias in ("LONG","SHORT"):
+if bias in ("LONG", "SHORT"):
     rotation_in = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.head(3).iterrows()]
     rotation_out = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.tail(3).iterrows()]
 else:
     rotation_in, rotation_out = [], []
 
 if bias == "MIXED" or strength < 50:
-    plan = "Plan: Defensive. Trade smaller, or wait for A+ triggers (inside bars / clean 2-1-2)."
+    plan = "Plan: Defensive. Trade smaller, or wait for A+ triggers."
     badge = "🟠"
 elif bias == "LONG":
-    plan = "Plan: LONG only. Prioritize Weekly 2-1-2 UP + Inside Bar breaks. Prefer higher RR + ATR%."
+    plan = "Plan: LONG only. Focus strong groups with triggers."
     badge = "🟢"
 else:
-    plan = "Plan: SHORT only. Prioritize Weekly 2-1-2 DN + Inside Bar breaks. Prefer higher RR + ATR%."
+    plan = "Plan: SHORT only. Focus weak groups with triggers."
     badge = "🔴"
 
-st.write(f"Bias: **{bias}** {badge} | Strength: **{strength}/100** | Bull–Bear diff: **{bull_bear_diff}**")
-if rotation_in and rotation_out:
-    st.write(f"Rotation IN: {', '.join(rotation_in)} | OUT: {', '.join(rotation_out)}")
+st.write(
+    f"Bias: **{bias}** {badge} | "
+    f"Strength: **{strength}/100** | "
+    f"Bull–Bear diff: **{bull_bear_diff}**"
+)
+
+if rotation_in:
+    st.write("### Rotation IN")
+    st.write(", ".join(rotation_in))
+
+if rotation_out:
+    st.write("### Rotation OUT")
+    st.write(", ".join(rotation_out))
 
 st.success(plan)
 st.caption(
-    "Trigger logic: If Inside Bar exists, LONG = buy break of High / stop below Low. "
-    "SHORT = sell break of Low / stop above High. Weekly triggers are preferred when available."
+    "Trigger logic: LONG = break of Inside Bar high / stop below low. "
+    "SHORT = break of Inside Bar low / stop above high. Weekly triggers preferred."
 )
