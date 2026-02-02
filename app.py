@@ -1,15 +1,50 @@
+# app.py
+import math
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
 import pandas as pd
-import yfinance as yf
 import streamlit as st
+import yfinance as yf
 
-# -----------------------------
-# PAGE CONFIG
-# -----------------------------
-st.set_page_config(page_title="STRAT Regime Scanner", layout="wide")
+# =========================
+# STREAMLIT CONFIG
+# =========================
+st.set_page_config(
+    page_title="STRAT Regime Scanner",
+    layout="wide",
+)
 
-# -----------------------------
+st.title("STRAT Regime Scanner (Auto LONG/SHORT + Magnitude)")
+st.caption("Bias from market regime. Ranks tickers by setup quality AND magnitude (RR + ATR% + compression).")
+
+# =========================
+# CONTROLS / UI
+# =========================
+with st.expander("Filters", expanded=True):
+    colA, colB, colC, colD = st.columns([1.1, 1.2, 1.6, 1.1])
+
+    with colA:
+        only_inside = st.checkbox("ONLY Inside Bars (D or W)", value=False)
+    with colB:
+        only_212 = st.checkbox("ONLY 2-1-2 forming (bias direction)", value=False)
+    with colC:
+        require_alignment = st.checkbox("Require Monthly OR Weekly alignment (bias direction)", value=True)
+    with colD:
+        top_k = st.slider("Top Picks count", min_value=3, max_value=8, value=5)
+
+    colR1, colR2 = st.columns([1, 3])
+    with colR1:
+        if st.button("Refresh data"):
+            st.cache_data.clear()
+            st.rerun()
+
+st.caption(f"Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+
+# =========================
 # UNIVERSE
-# -----------------------------
+# =========================
 MARKET_ETFS = {
     "S&P 500": "SPY",
     "Nasdaq 100": "QQQ",
@@ -18,665 +53,602 @@ MARKET_ETFS = {
 }
 
 SECTOR_ETFS = {
-    "Materials": "XLB",
-    "Comm Services": "XLC",
     "Energy": "XLE",
-    "Financials": "XLF",
-    "Industrials": "XLI",
-    "Technology": "XLK",
+    "Comm Services": "XLC",
     "Staples": "XLP",
+    "Materials": "XLB",
+    "Industrials": "XLI",
     "Real Estate": "XLRE",
-    "Utilities": "XLU",
-    "Health Care": "XLV",
     "Discretionary": "XLY",
+    "Utilities": "XLU",
+    "Financials": "XLF",
+    "Technology": "XLK",
+    "Health Care": "XLV",
 }
 
-# Stable drill-down lists: top liquid names per sector
-SECTOR_TOP_TICKERS = {
-    "XLK": ["AAPL","MSFT","NVDA","AVGO","AMD","ADBE","CRM","INTC","CSCO","QCOM","ORCL","NOW","TXN","AMAT","MU"],
-    "XLF": ["JPM","BAC","WFC","GS","MS","C","SCHW","AXP","BLK","USB","PNC","TFC","CB","AIG","COF"],
-    "XLE": ["XOM","CVX","COP","SLB","EOG","MPC","PSX","VLO","OXY","KMI","HES","DVN","BKR","HAL","PXD"],
-    "XLV": ["LLY","UNH","JNJ","MRK","ABBV","PFE","TMO","DHR","ABT","BMY","AMGN","ISRG","GILD","VRTX","MDT"],
-    "XLI": ["CAT","DE","GE","RTX","BA","HON","ETN","UPS","LMT","MMM","NOC","EMR","ITW","GD","CSX"],
-    "XLY": ["AMZN","TSLA","HD","MCD","NKE","LOW","SBUX","BKNG","TGT","F","GM","MAR","RCL","CMG","EBAY"],
-    "XLP": ["PG","KO","PEP","WMT","COST","PM","MDLZ","CL","KMB","KR","MO","HSY","KHC","WBA","MNST"],
-    "XLU": ["NEE","DUK","SO","D","AEP","EXC","SRE","PEG","XEL","ED","EIX","WEC","AWK","CMS","ES"],
-    "XLB": ["LIN","APD","ECL","SHW","FCX","NEM","DOW","DD","VMC","MLM","NUE","ALB","IFF","PPG","STLD"],
-    "XLRE":["PLD","AMT","EQIX","CCI","PSA","O","SPG","WELL","AVB","DLR","VTR","EQR","CBRE","IRM","ARE"],
-    "XLC": ["GOOGL","META","NFLX","TMUS","VZ","T","DIS","CHTR","CMCSA","EA","ROKU","TTWO","WBD","FOXA","PARA"],
+# Practical, stable “top liquid names” lists (no scraping required; Streamlit Cloud-safe).
+# You can edit/expand these anytime.
+SECTOR_TICKERS: Dict[str, List[str]] = {
+    "Energy": ["XOM","CVX","COP","EOG","SLB","HAL","PSX","MPC","VLO","OXY","KMI","WMB","BKR","DVN","PXD"],
+    "Comm Services": ["GOOGL","GOOG","META","NFLX","TMUS","VZ","T","DIS","CMCSA","CHTR","EA","TTWO","SPOT","ROKU","SNAP"],
+    "Staples": ["PG","KO","PEP","WMT","COST","PM","MO","MDLZ","CL","KMB","GIS","KHC","SYY","HSY","EL"],
+    "Materials": ["LIN","APD","SHW","NUE","DOW","PPG","ECL","FCX","NEM","IFF","MLM","VMC","ALB","MOS","DD"],
+    "Industrials": ["CAT","DE","HON","GE","LMT","RTX","BA","UNP","UPS","FDX","ETN","EMR","CSX","NSC","WM"],
+    "Real Estate": ["PLD","AMT","EQIX","PSA","O","WELL","DLR","SPG","CCI","VICI","AVB","EQR","IRM","SBAC","EXR"],
+    "Discretionary": ["AMZN","TSLA","HD","MCD","NKE","SBUX","LOW","BKNG","TJX","GM","F","MAR","ROST","ORLY","CMG"],
+    "Utilities": ["NEE","DUK","SO","D","AEP","EXC","XEL","SRE","ED","PEG","EIX","PCG","WEC","ES","AWK"],
+    "Financials": ["BRK-B","JPM","BAC","WFC","GS","MS","C","BLK","SCHW","AXP","SPGI","ICE","CME","PNC","TFC"],
+    "Technology": ["AAPL","MSFT","NVDA","AVGO","CRM","ORCL","ADBE","AMD","CSCO","INTC","QCOM","TXN","NOW","AMAT","MU"],
+    "Health Care": ["UNH","JNJ","LLY","PFE","MRK","ABBV","TMO","ABT","DHR","BMY","AMGN","GILD","ISRG","VRTX","MDT"],
 }
 
-# -----------------------------
-# HELPERS
-# -----------------------------
-def _scalar(x):
-    try:
-        return float(x.item())
-    except Exception:
-        return float(x)
-
-def bool_to_int(b):
-    return 1 if bool(b) else 0
+# =========================
+# DATA FETCH (CACHED)
+# =========================
+@st.cache_data(ttl=60 * 30, show_spinner=False)
+def get_hist(ticker: str, period: str = "3y") -> pd.DataFrame:
+    """
+    Streamlit Cloud-safe cached fetch.
+    """
+    df = yf.download(
+        ticker,
+        period=period,
+        interval="1d",
+        auto_adjust=False,
+        progress=False,
+        threads=True,
+    )
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df = df.dropna()
+    # Ensure OHLC columns exist
+    for c in ["Open", "High", "Low", "Close", "Volume"]:
+        if c not in df.columns:
+            return pd.DataFrame()
+    return df
 
 def resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    o = df["Open"].resample(rule).first()
-    h = df["High"].resample(rule).max()
-    l = df["Low"].resample(rule).min()
-    c = df["Close"].resample(rule).last()
-    out = pd.concat([o, h, l, c], axis=1).dropna()
-    out.columns = ["Open", "High", "Low", "Close"]
+    """
+    Resample daily OHLCV to weekly/monthly.
+    """
+    ohlc = df[["Open", "High", "Low", "Close"]].resample(rule).agg({
+        "Open": "first",
+        "High": "max",
+        "Low": "min",
+        "Close": "last",
+    })
+    vol = df[["Volume"]].resample(rule).sum()
+    out = pd.concat([ohlc, vol], axis=1).dropna()
     return out
 
-@st.cache_data(ttl=60 * 60)
-def get_prices(ticker: str, period: str = "24mo") -> pd.DataFrame:
-    d = yf.download(ticker, period=period, interval="1d", auto_adjust=False, progress=False)
-    if d is None or d.empty:
-        return pd.DataFrame()
+# =========================
+# STRAT HELPERS
+# =========================
+def is_inside_bar(cur: pd.Series, prev: pd.Series) -> bool:
+    return (cur["High"] <= prev["High"]) and (cur["Low"] >= prev["Low"])
 
-    if isinstance(d.columns, pd.MultiIndex):
-        d.columns = d.columns.get_level_values(0)
+def is_2up(cur: pd.Series, prev: pd.Series) -> bool:
+    return (cur["High"] > prev["High"]) and (cur["Low"] >= prev["Low"])
 
-    d.columns = [str(c).title() for c in d.columns]
-    keep = [c for c in ["Open", "High", "Low", "Close"] if c in d.columns]
-    d = d[keep].dropna()
+def is_2dn(cur: pd.Series, prev: pd.Series) -> bool:
+    return (cur["Low"] < prev["Low"]) and (cur["High"] <= prev["High"])
 
-    for c in keep:
-        d[c] = pd.to_numeric(d[c], errors="coerce")
+def is_green(cur: pd.Series) -> bool:
+    return cur["Close"] > cur["Open"]
 
-    return d.dropna()
+def is_red(cur: pd.Series) -> bool:
+    return cur["Close"] < cur["Open"]
 
-def strat_bar_type_last(df: pd.DataFrame) -> str:
-    """Return last bar type relative to previous: 1 / 2U / 2D / 3"""
+def last_two(df: pd.DataFrame) -> Optional[Tuple[pd.Series, pd.Series]]:
     if df is None or df.empty or len(df) < 2:
-        return ""
-    cur = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    curH, prevH = _scalar(cur["High"]), _scalar(prev["High"])
-    curL, prevL = _scalar(cur["Low"]), _scalar(prev["Low"])
-
-    inside = (curH <= prevH) and (curL >= prevL)
-    outside = (curH > prevH) and (curL < prevL)
-    two_up = (curH > prevH) and (curL >= prevL)
-    two_dn = (curL < prevL) and (curH <= prevH)
-
-    if inside: return "1"
-    if outside: return "3"
-    if two_up: return "2U"
-    if two_dn: return "2D"
-    return ""
-
-def is_inside_last(df: pd.DataFrame) -> bool:
-    return strat_bar_type_last(df) == "1"
-
-def inside_trigger_levels(df: pd.DataFrame):
-    """If LAST bar is inside bar (1), return (high, low). Else (None, None)."""
-    if df is None or df.empty or len(df) < 2:
-        return (None, None)
-    if strat_bar_type_last(df) != "1":
-        return (None, None)
-    cur = df.iloc[-1]
-    return (_scalar(cur["High"]), _scalar(cur["Low"]))
-
-def green_2u_last(df: pd.DataFrame) -> bool:
-    """Bull: Green 2Up on LAST bar."""
-    if df is None or df.empty or len(df) < 2:
-        return False
-    cur = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    curH = _scalar(cur["High"]);  prevH = _scalar(prev["High"])
-    curL = _scalar(cur["Low"]);   prevL = _scalar(prev["Low"])
-    curC = _scalar(cur["Close"]); curO = _scalar(cur["Open"])
-
-    is_2u = (curH > prevH) and (curL >= prevL)
-    is_green = (curC > curO)
-    return bool(is_2u and is_green)
-
-def red_2d_last(df: pd.DataFrame) -> bool:
-    """Bear: Red 2Down on LAST bar."""
-    if df is None or df.empty or len(df) < 2:
-        return False
-    cur = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    curH = _scalar(cur["High"]);  prevH = _scalar(prev["High"])
-    curL = _scalar(cur["Low"]);   prevL = _scalar(prev["Low"])
-    curC = _scalar(cur["Close"]); curO = _scalar(cur["Open"])
-
-    is_2d = (curL < prevL) and (curH <= prevH)
-    is_red = (curC < curO)
-    return bool(is_2d and is_red)
-
-def setup_212_up_forming(df: pd.DataFrame) -> bool:
-    """2-1-2 UP forming: previous = 2U, current = 1."""
-    if df is None or df.empty or len(df) < 3:
-        return False
-    cur_type = strat_bar_type_last(df)
-    prev_type = strat_bar_type_last(df.iloc[:-1])
-    return (prev_type == "2U") and (cur_type == "1")
-
-def setup_212_dn_forming(df: pd.DataFrame) -> bool:
-    """2-1-2 DOWN forming: previous = 2D, current = 1."""
-    if df is None or df.empty or len(df) < 3:
-        return False
-    cur_type = strat_bar_type_last(df)
-    prev_type = strat_bar_type_last(df.iloc[:-1])
-    return (prev_type == "2D") and (cur_type == "1")
-
-def atr14(df: pd.DataFrame, length: int = 14):
-    """ATR using True Range, returns last ATR value or None."""
-    if df is None or df.empty or len(df) < length + 2:
         return None
-    h = df["High"].astype(float)
-    l = df["Low"].astype(float)
-    c = df["Close"].astype(float)
+    cur = df.iloc[-1]
+    prev = df.iloc[-2]
+    return cur, prev
 
+def strat_bull(df: pd.DataFrame) -> bool:
+    pair = last_two(df)
+    if not pair:
+        return False
+    cur, prev = pair
+    return is_2up(cur, prev) and is_green(cur)
+
+def strat_bear(df: pd.DataFrame) -> bool:
+    pair = last_two(df)
+    if not pair:
+        return False
+    cur, prev = pair
+    return is_2dn(cur, prev) and is_red(cur)
+
+def strat_inside(df: pd.DataFrame) -> bool:
+    pair = last_two(df)
+    if not pair:
+        return False
+    cur, prev = pair
+    return is_inside_bar(cur, prev)
+
+def strat_212_up(df: pd.DataFrame) -> bool:
+    if df is None or df.empty or len(df) < 3:
+        return False
+    a, b, c = df.iloc[-3], df.iloc[-2], df.iloc[-1]
+    return is_2up(a, df.iloc[-4] if len(df) >= 4 else a) and is_inside_bar(b, a) and is_2up(c, b)
+
+def strat_212_dn(df: pd.DataFrame) -> bool:
+    if df is None or df.empty or len(df) < 3:
+        return False
+    a, b, c = df.iloc[-3], df.iloc[-2], df.iloc[-1]
+    return is_2dn(a, df.iloc[-4] if len(df) >= 4 else a) and is_inside_bar(b, a) and is_2dn(c, b)
+
+def atr14(df: pd.DataFrame) -> float:
+    if df is None or df.empty or len(df) < 20:
+        return float("nan")
+    h = df["High"]
+    l = df["Low"]
+    c = df["Close"]
     prev_c = c.shift(1)
-    tr = pd.concat([
-        (h - l).abs(),
-        (h - prev_c).abs(),
-        (l - prev_c).abs()
-    ], axis=1).max(axis=1)
+    tr = pd.concat([(h - l).abs(), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    return float(tr.rolling(14).mean().iloc[-1])
 
-    atr = tr.rolling(length).mean()
-    v = atr.iloc[-1]
-    return None if pd.isna(v) else float(v)
+def clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
 
-def signals_all(ticker: str) -> dict:
-    """Returns both bull + bear signals + inside triggers."""
-    d = get_prices(ticker)
-    if d.empty or len(d) < 60:
-        return {
-            "D_Bull": False, "W_Bull": False, "M_Bull": False,
-            "D_Bear": False, "W_Bear": False, "M_Bear": False,
-            "D_Inside": False, "W_Inside": False, "M_Inside": False,
-            "D_212Up": False, "W_212Up": False,
-            "D_212Dn": False, "W_212Dn": False,
-            "D_TrigHigh": None, "D_TrigLow": None,
-            "W_TrigHigh": None, "W_TrigLow": None,
-        }
+# =========================
+# FEATURE BUILDERS
+# =========================
+def tf_frames(daily: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    d = daily.copy()
+    w = resample_ohlc(daily, "W-FRI")
+    m = resample_ohlc(daily, "M")
+    return d, w, m
 
-    w = resample_ohlc(d, "W-FRI")
-    m = resample_ohlc(d, "M")
-
-    D_bull = green_2u_last(d)
-    W_bull = green_2u_last(w)
-    M_bull = green_2u_last(m)
-
-    D_bear = red_2d_last(d)
-    W_bear = red_2d_last(w)
-    M_bear = red_2d_last(m)
-
-    D_inside = is_inside_last(d)
-    W_inside = is_inside_last(w)
-    M_inside = is_inside_last(m)
-
-    D_212u = setup_212_up_forming(d)
-    W_212u = setup_212_up_forming(w)
-
-    D_212d = setup_212_dn_forming(d)
-    W_212d = setup_212_dn_forming(w)
-
-    d_hi, d_lo = inside_trigger_levels(d)
-    w_hi, w_lo = inside_trigger_levels(w)
-
+def compute_flags(d: pd.DataFrame, w: pd.DataFrame, m: pd.DataFrame) -> Dict[str, bool]:
     return {
-        "D_Bull": D_bull, "W_Bull": W_bull, "M_Bull": M_bull,
-        "D_Bear": D_bear, "W_Bear": W_bear, "M_Bear": M_bear,
-        "D_Inside": D_inside, "W_Inside": W_inside, "M_Inside": M_inside,
-        "D_212Up": D_212u, "W_212Up": W_212u,
-        "D_212Dn": D_212d, "W_212Dn": W_212d,
-        "D_TrigHigh": d_hi, "D_TrigLow": d_lo,
-        "W_TrigHigh": w_hi, "W_TrigLow": w_lo,
+        "D_Bull": strat_bull(d),
+        "W_Bull": strat_bull(w),
+        "M_Bull": strat_bull(m),
+        "D_Bear": strat_bear(d),
+        "W_Bear": strat_bear(w),
+        "M_Bear": strat_bear(m),
+        "D_Inside": strat_inside(d),
+        "W_Inside": strat_inside(w),
+        "M_Inside": strat_inside(m),
+        "D_212Up": strat_212_up(d),
+        "W_212Up": strat_212_up(w),
+        "D_212Dn": strat_212_dn(d),
+        "W_212Dn": strat_212_dn(w),
     }
 
-def market_bias_from_df(market_df: pd.DataFrame):
-    """Bias based on BullScore - BearScore across SPY/QQQ/IWM/DIA."""
-    if market_df is None or market_df.empty:
-        return ("MIXED", 50, 0)
+def score_regime(flags: Dict[str, bool]) -> Tuple[int, int]:
+    """
+    Weighted bull/bear points.
+    """
+    bull = 0
+    bear = 0
 
-    diffs = []
-    mags = []
-    for _, r in market_df.iterrows():
-        bull = (
-            35 * bool_to_int(r.get("M_Bull", False)) +
-            30 * bool_to_int(r.get("W_Bull", False)) +
-            15 * bool_to_int(r.get("D_Bull", False)) +
-            10 * bool_to_int(r.get("W_212Up", False)) +
-            5  * bool_to_int(r.get("D_212Up", False))
-        )
-        bear = (
-            35 * bool_to_int(r.get("M_Bear", False)) +
-            30 * bool_to_int(r.get("W_Bear", False)) +
-            15 * bool_to_int(r.get("D_Bear", False)) +
-            10 * bool_to_int(r.get("W_212Dn", False)) +
-            5  * bool_to_int(r.get("D_212Dn", False))
-        )
-        diffs.append(bull - bear)
-        mags.append(max(bull, bear))
+    # Trend / alignment
+    bull += 3 if flags["M_Bull"] else 0
+    bull += 2 if flags["W_Bull"] else 0
+    bull += 1 if flags["D_Bull"] else 0
 
-    diff = sum(diffs) / max(1, len(diffs))
-    strength = sum(mags) / max(1, len(mags))
+    bear += 3 if flags["M_Bear"] else 0
+    bear += 2 if flags["W_Bear"] else 0
+    bear += 1 if flags["D_Bear"] else 0
 
-    if diff >= 15:
-        return ("LONG", int(round(strength)), diff)
-    elif diff <= -15:
-        return ("SHORT", int(round(strength)), diff)
+    # Continuations
+    bull += 2 if flags["W_212Up"] else 0
+    bull += 1 if flags["D_212Up"] else 0
+    bear += 2 if flags["W_212Dn"] else 0
+    bear += 1 if flags["D_212Dn"] else 0
+
+    return bull, bear
+
+def market_bias_and_strength(market_rows: List[Dict]) -> Tuple[str, int, int]:
+    bull_total = sum(r["BullScore"] for r in market_rows)
+    bear_total = sum(r["BearScore"] for r in market_rows)
+    diff = bull_total - bear_total
+
+    # Convert diff to a 0–100 strength scale (simple and stable)
+    strength = int(clamp(50 + diff * 5, 0, 100))
+
+    if diff >= 3:
+        bias = "LONG"
+    elif diff <= -3:
+        bias = "SHORT"
     else:
-        return ("MIXED", int(round(strength)), diff)
+        bias = "MIXED"
 
-def rank_score(sig: dict, bias: str) -> int:
-    """Setup/Direction score (not magnitude)."""
-    score = 0
+    return bias, strength, diff
+
+def alignment_ok(bias: str, flags: Dict[str, bool]) -> bool:
+    if bias == "LONG":
+        return flags["M_Bull"] or flags["W_Bull"]
     if bias == "SHORT":
-        if sig["W_212Dn"]: score += 100
-        if sig["D_212Dn"]: score += 60
-        if sig["M_Bear"]:  score += 30
-        if sig["W_Bear"]:  score += 25
-        if sig["D_Bear"]:  score += 10
-        if sig["W_Inside"]: score += 20
-        if sig["D_Inside"]: score += 10
-        if sig["M_Inside"]: score += 10
-    else:
-        if sig["W_212Up"]: score += 100
-        if sig["D_212Up"]: score += 60
-        if sig["M_Bull"]:  score += 30
-        if sig["W_Bull"]:  score += 25
-        if sig["D_Bull"]:  score += 10
-        if sig["W_Inside"]: score += 20
-        if sig["D_Inside"]: score += 10
-        if sig["M_Inside"]: score += 10
-    return score
+        return flags["M_Bear"] or flags["W_Bear"]
+    return False
 
-def pick_entry_stop(sig: dict, bias: str):
-    """
-    Uses inside bar triggers if present.
-    LONG: entry = trig high, stop = trig low
-    SHORT: entry = trig low, stop = trig high
-    Prefer weekly inside triggers; else daily.
-    """
-    w_hi, w_lo = sig.get("W_TrigHigh"), sig.get("W_TrigLow")
-    d_hi, d_lo = sig.get("D_TrigHigh"), sig.get("D_TrigLow")
-
-    use_weekly = (w_hi is not None) and (w_lo is not None) and sig.get("W_Inside", False)
-    use_daily = (d_hi is not None) and (d_lo is not None) and sig.get("D_Inside", False)
-
-    if use_weekly:
-        tf, hi, lo = "W", w_hi, w_lo
-    elif use_daily:
-        tf, hi, lo = "D", d_hi, d_lo
-    else:
-        return (None, None, None)
-
+def setup_ok(bias: str, flags: Dict[str, bool]) -> bool:
+    if bias == "LONG":
+        return flags["D_Inside"] or flags["W_Inside"] or flags["D_212Up"] or flags["W_212Up"]
     if bias == "SHORT":
-        return (tf, lo, hi)   # entry low, stop high
-    return (tf, hi, lo)       # entry high, stop low
+        return flags["D_Inside"] or flags["W_Inside"] or flags["D_212Dn"] or flags["W_212Dn"]
+    return False
 
-def magnitude_metrics(ticker: str, bias: str, entry: float, stop: float, tf: str, sig: dict):
+def best_trigger(bias: str, d: pd.DataFrame, w: pd.DataFrame) -> Tuple[Optional[str], Optional[float], Optional[float]]:
     """
-    Magnitude = room-to-run vs risk + does it move enough (ATR%).
-    - Target uses recent 63 trading days (approx 3 months) high/low.
+    Prefer Weekly inside bar triggers if present; else Daily inside.
+    Returns (TF, entry, stop) for the bias direction.
     """
-    d = get_prices(ticker)
-    if d is None or d.empty or entry is None or stop is None:
-        return (None, None, None, None, 0)
+    # Weekly inside trigger
+    if strat_inside(w) and len(w) >= 2:
+        cur, prev = w.iloc[-1], w.iloc[-2]
+        hi, lo = float(cur["High"]), float(cur["Low"])
+        if bias == "LONG":
+            return "W", hi, lo
+        if bias == "SHORT":
+            return "W", lo, hi
+
+    # Daily inside trigger
+    if strat_inside(d) and len(d) >= 2:
+        cur, prev = d.iloc[-1], d.iloc[-2]
+        hi, lo = float(cur["High"]), float(cur["Low"])
+        if bias == "LONG":
+            return "D", hi, lo
+        if bias == "SHORT":
+            return "D", lo, hi
+
+    return None, None, None
+
+def magnitude_metrics(bias: str, d: pd.DataFrame, entry: Optional[float], stop: Optional[float]) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    """
+    Returns: (RR, ATR%, Room, Compression)
+    - RR uses target as a practical reference: 63-day high/low from daily frame.
+    - ATR% uses daily ATR14 / close.
+    - Room is distance to 63-day extreme from entry (in points).
+    - Compression uses inside-bar range relative to ATR (lower is tighter).
+    """
+    if entry is None or stop is None or d is None or d.empty or len(d) < 80:
+        return None, None, None, None
 
     close = float(d["Close"].iloc[-1])
-    atr = atr14(d, 14)
-    atr_pct = (atr / close) * 100 if (atr is not None and close > 0) else None
+    atr = atr14(d)
+    if not math.isfinite(atr) or atr <= 0:
+        return None, None, None, None
 
-    lookback = 63 if len(d) >= 63 else len(d)
-    recent = d.tail(lookback)
+    atrp = (atr / close) * 100.0
 
-    recent_high = float(recent["High"].max())
-    recent_low = float(recent["Low"].min())
+    # 63-day extremes
+    hi63 = float(d["High"].rolling(63).max().iloc[-1])
+    lo63 = float(d["Low"].rolling(63).min().iloc[-1])
 
-    risk = abs(entry - stop)
+    if bias == "LONG":
+        target = hi63
+        room = max(0.0, target - entry)
+        risk = entry - stop
+        reward = target - entry
+    else:
+        target = lo63
+        room = max(0.0, entry - target)
+        risk = stop - entry
+        reward = entry - target
+
     if risk <= 0:
-        return (atr, atr_pct, None, None, 0)
-
-    if bias == "SHORT":
-        room = entry - recent_low
+        rr = None
     else:
-        room = recent_high - entry
+        rr = reward / risk if reward > 0 else 0.0
 
-    rr = room / risk
+    # Compression: if last bar is inside, use its range vs ATR; else None
+    compression = None
+    if strat_inside(d) and len(d) >= 2:
+        cur = d.iloc[-1]
+        rng = float(cur["High"] - cur["Low"])
+        compression = rng / atr if atr > 0 else None
 
-    # Compression factor if we used inside bar triggers
-    bar_range = None
-    if tf == "W" and sig.get("W_TrigHigh") is not None and sig.get("W_TrigLow") is not None:
-        bar_range = float(sig["W_TrigHigh"] - sig["W_TrigLow"])
-    if tf == "D" and sig.get("D_TrigHigh") is not None and sig.get("D_TrigLow") is not None:
-        bar_range = float(sig["D_TrigHigh"] - sig["D_TrigLow"])
+    return rr, atrp, room, compression
 
-    # Magnitude score (simple + practical)
-    mag_score = 0
+def calc_scores(
+    bias: str,
+    flags: Dict[str, bool],
+    rr: Optional[float],
+    atrp: Optional[float],
+    compression: Optional[float],
+    entry: Optional[float],
+    stop: Optional[float],
+) -> Tuple[int, int, int]:
+    """
+    SetupScore: structure quality
+    MagScore: RR/ATR%/compression-based
+    TotalScore: Setup + Mag
+    """
+    setup = 0
+    mag = 0
 
-    # RR scoring
-    if rr >= 3.0:
-        mag_score += 40
-    elif rr >= 2.0:
-        mag_score += 25
-    elif rr >= 1.5:
-        mag_score += 15
-    elif rr >= 1.0:
-        mag_score += 5
+    # Base setup
+    if bias == "LONG":
+        setup += 30 if flags["M_Bull"] else 0
+        setup += 20 if flags["W_Bull"] else 0
+        setup += 10 if flags["D_Bull"] else 0
+        setup += 20 if flags["W_212Up"] else 0
+        setup += 10 if flags["D_212Up"] else 0
+    elif bias == "SHORT":
+        setup += 30 if flags["M_Bear"] else 0
+        setup += 20 if flags["W_Bear"] else 0
+        setup += 10 if flags["D_Bear"] else 0
+        setup += 20 if flags["W_212Dn"] else 0
+        setup += 10 if flags["D_212Dn"] else 0
 
-    # ATR% scoring (options need movement)
-    if atr_pct is not None:
-        if atr_pct >= 3.0:
-            mag_score += 10
-        elif atr_pct >= 2.0:
-            mag_score += 7
-        elif atr_pct >= 1.0:
-            mag_score += 4
+    # Compression bonus (inside bars)
+    setup += 10 if flags["W_Inside"] else 0
+    setup += 5 if flags["D_Inside"] else 0
 
-    # Compression scoring (inside bar tightness vs ATR)
-    if bar_range is not None and atr is not None and atr > 0:
-        comp = bar_range / atr
-        if comp <= 0.75:
-            mag_score += 10
-        elif comp <= 1.0:
-            mag_score += 6
-        elif comp <= 1.25:
-            mag_score += 3
+    # Magnitude score (stable and simple)
+    if rr is not None:
+        if rr >= 3:
+            mag += 35
+        elif rr >= 2:
+            mag += 25
+        elif rr >= 1.5:
+            mag += 10
 
-    return (atr, atr_pct, room, rr, mag_score)
+    if atrp is not None:
+        if atrp >= 3:
+            mag += 20
+        elif atrp >= 2:
+            mag += 10
+        elif atrp >= 1:
+            mag += 5
 
-def top_sectors_text(sector_df: pd.DataFrame, bias: str, n: int = 3) -> str:
-    if sector_df is None or sector_df.empty:
-        return "Strong Sectors: n/a"
-    df = sector_df.copy()
+    # Tighter compression is better (if present)
+    if compression is not None:
+        if compression <= 0.6:
+            mag += 15
+        elif compression <= 0.9:
+            mag += 8
+        elif compression <= 1.2:
+            mag += 3
 
-    if bias == "SHORT":
-        df["Strength"] = (
-            3 * df["BearScore"] +
-            4 * df["W_212Dn"].astype(int) +
-            2 * df["D_212Dn"].astype(int) +
-            2 * df["W_Inside"].astype(int) +
-            1 * df["D_Inside"].astype(int)
-        )
+    # Valid trigger boosts
+    if entry is not None and stop is not None:
+        mag += 5
+
+    total = setup + mag
+    return setup, mag, total
+
+# =========================
+# BUILD MARKET REGIME
+# =========================
+market_rows: List[Dict] = []
+for name, etf in MARKET_ETFS.items():
+    d = get_hist(etf)
+    if d.empty:
+        flags = {k: False for k in [
+            "D_Bull","W_Bull","M_Bull","D_Bear","W_Bear","M_Bear",
+            "D_Inside","W_Inside","M_Inside","D_212Up","W_212Up","D_212Dn","W_212Dn"
+        ]}
+        bull, bear = 0, 0
     else:
-        df["Strength"] = (
-            3 * df["BullScore"] +
-            4 * df["W_212Up"].astype(int) +
-            2 * df["D_212Up"].astype(int) +
-            2 * df["W_Inside"].astype(int) +
-            1 * df["D_Inside"].astype(int)
-        )
+        d_tf, w_tf, m_tf = tf_frames(d)
+        flags = compute_flags(d_tf, w_tf, m_tf)
+        bull, bear = score_regime(flags)
 
-    leaders = df.sort_values("Strength", ascending=False).head(n)
-    txt = ", ".join([f"{r['Sector']}({r['ETF']})" for _, r in leaders.iterrows()])
-    return f"Strong Sectors: {txt}"
+    row = {"Market": name, "ETF": etf, "BullScore": bull, "BearScore": bear}
+    row.update(flags)
+    market_rows.append(row)
 
-def rotation_text(sector_df: pd.DataFrame, bias: str, n: int = 3) -> str:
-    if sector_df is None or sector_df.empty:
-        return "Rotation: n/a"
-    df = sector_df.copy()
+bias, strength, bull_bear_diff = market_bias_and_strength(market_rows)
 
-    if bias == "SHORT":
-        df["FreshIn"] = (
-            2 * df["W_Bear"].astype(int) +
-            1 * df["D_Bear"].astype(int) +
-            2 * df["W_212Dn"].astype(int) +
-            1 * df["D_212Dn"].astype(int) -
-            1 * df["M_Bear"].astype(int)
-        )
-        df["WeakOut"] = (
-            2 * (1 - df["W_Bear"].astype(int)) +
-            1 * (1 - df["D_Bear"].astype(int)) +
-            2 * (1 - df["W_212Dn"].astype(int)) +
-            1 * (1 - df["D_212Dn"].astype(int))
-        ) + (df["M_Bear"].astype(int))
-    else:
-        df["FreshIn"] = (
-            2 * df["W_Bull"].astype(int) +
-            1 * df["D_Bull"].astype(int) +
-            2 * df["W_212Up"].astype(int) +
-            1 * df["D_212Up"].astype(int) -
-            1 * df["M_Bull"].astype(int)
-        )
-        df["WeakOut"] = (
-            2 * (1 - df["W_Bull"].astype(int)) +
-            1 * (1 - df["D_Bull"].astype(int)) +
-            2 * (1 - df["W_212Up"].astype(int)) +
-            1 * (1 - df["D_212Up"].astype(int))
-        ) + (df["M_Bull"].astype(int))
-
-    rot_in = df.sort_values("FreshIn", ascending=False).head(n)
-    rot_out = df.sort_values("WeakOut", ascending=False).head(n)
-
-    in_txt = ", ".join([f"{r['Sector']}({r['ETF']})" for _, r in rot_in.iterrows()])
-    out_txt = ", ".join([f"{r['Sector']}({r['ETF']})" for _, r in rot_out.iterrows()])
-
-    return f"Rotation IN: {in_txt} | OUT: {out_txt}"
-
-def get_holdings(etf_ticker: str) -> list[str]:
-    return SECTOR_TOP_TICKERS.get(etf_ticker, [])
-
-def best_trade_candidate(df: pd.DataFrame):
-    """Best trade uses TotalScore and requires Entry/Stop."""
-    if df is None or df.empty:
-        return None
-    valid = df.dropna(subset=["Entry", "Stop", "TotalScore"])
-    if valid.empty:
-        return None
-    return valid.sort_values("TotalScore", ascending=False).iloc[0]
-
-# -----------------------------
-# UI
-# -----------------------------
-st.title("STRAT Regime Scanner (Auto LONG/SHORT + Magnitude)")
-st.caption("Bias from market regime. Ranks tickers by setup quality AND magnitude (RR + ATR% + compression).")
-
-with st.expander("Filters", expanded=True):
-    c1, c2, c3, c4 = st.columns(4)
-    only_inside = c1.checkbox("ONLY Inside Bars (D or W)", value=False)
-    only_212 = c2.checkbox("ONLY 2-1-2 forming (bias direction)", value=False)
-    require_bias = c3.checkbox("Require Monthly OR Weekly alignment (bias direction)", value=True)
-    top_n = c4.slider("Top Picks count", 3, 8, 5, 1)
-
-st.divider()
-
-# -----------------------------
-# MARKET TABLE
-# -----------------------------
 st.subheader("Market Regime (SPY / QQQ / IWM / DIA) — Bull vs Bear")
-market_rows = []
-for name, ticker in MARKET_ETFS.items():
-    s = signals_all(ticker)
-    market_rows.append({
-        "Market": name, "ETF": ticker,
-        "D_Bull": s["D_Bull"], "W_Bull": s["W_Bull"], "M_Bull": s["M_Bull"],
-        "D_Bear": s["D_Bear"], "W_Bear": s["W_Bear"], "M_Bear": s["M_Bear"],
-        "D_212Up": s["D_212Up"], "W_212Up": s["W_212Up"],
-        "D_212Dn": s["D_212Dn"], "W_212Dn": s["W_212Dn"],
-    })
-market_df = pd.DataFrame(market_rows)
-st.dataframe(market_df, use_container_width=True)
+market_df = pd.DataFrame(market_rows)[[
+    "Market","ETF",
+    "D_Bull","W_Bull","M_Bull",
+    "D_Bear","W_Bear","M_Bear",
+    "D_212Up","W_212Up","D_212Dn","W_212Dn"
+]]
+st.dataframe(market_df, use_container_width=True, hide_index=True)
 
-bias, strength, diff = market_bias_from_df(market_df)
+# =========================
+# BUILD SECTOR TABLE
+# =========================
+sector_rows: List[Dict] = []
+for sector, etf in SECTOR_ETFS.items():
+    d = get_hist(etf)
+    if d.empty:
+        flags = {k: False for k in [
+            "D_Bull","W_Bull","M_Bull","D_Bear","W_Bear","M_Bear",
+            "D_Inside","W_Inside","M_Inside","D_212Up","W_212Up","D_212Dn","W_212Dn"
+        ]}
+        bull, bear = 0, 0
+    else:
+        d_tf, w_tf, m_tf = tf_frames(d)
+        flags = compute_flags(d_tf, w_tf, m_tf)
+        bull, bear = score_regime(flags)
 
-st.divider()
+    row = {"Sector": sector, "ETF": etf, "BullScore": bull, "BearScore": bear}
+    row.update(flags)
+    sector_rows.append(row)
 
-# -----------------------------
-# SECTOR TABLE
-# -----------------------------
+sectors_df = pd.DataFrame(sector_rows)
+
+# Rank after bias is known
+if bias == "LONG":
+    sectors_df = sectors_df.sort_values(["BullScore","BearScore"], ascending=[False, True])
+elif bias == "SHORT":
+    sectors_df = sectors_df.sort_values(["BearScore","BullScore"], ascending=[False, True])
+else:
+    # Mixed: show by absolute dominance
+    sectors_df["Dominance"] = (sectors_df["BullScore"] - sectors_df["BearScore"]).abs()
+    sectors_df = sectors_df.sort_values("Dominance", ascending=False)
+
 st.subheader("Sectors (SPDR) — ranked after bias is known")
-sector_rows = []
-for sector_name, etf in SECTOR_ETFS.items():
-    s = signals_all(etf)
-    bull_score = int(s["D_Bull"]) + int(s["W_Bull"]) + int(s["M_Bull"])
-    bear_score = int(s["D_Bear"]) + int(s["W_Bear"]) + int(s["M_Bear"])
-    sector_rows.append({
-        "Sector": sector_name, "ETF": etf,
-        "BullScore": bull_score, "BearScore": bear_score,
-        "D_Bull": s["D_Bull"], "W_Bull": s["W_Bull"], "M_Bull": s["M_Bull"],
-        "D_Bear": s["D_Bear"], "W_Bear": s["W_Bear"], "M_Bear": s["M_Bear"],
-        "D_Inside": s["D_Inside"], "W_Inside": s["W_Inside"], "M_Inside": s["M_Inside"],
-        "D_212Up": s["D_212Up"], "W_212Up": s["W_212Up"],
-        "D_212Dn": s["D_212Dn"], "W_212Dn": s["W_212Dn"],
-    })
+st.dataframe(
+    sectors_df[[
+        "Sector","ETF","BullScore","BearScore",
+        "D_Bull","W_Bull","M_Bull","D_Bear","W_Bear","M_Bear",
+        "D_Inside","W_Inside","M_Inside",
+        "D_212Up","W_212Up","D_212Dn","W_212Dn"
+    ]],
+    use_container_width=True,
+    hide_index=True
+)
 
-sector_df = pd.DataFrame(sector_rows)
-if bias == "SHORT":
-    sector_df = sector_df.sort_values(["BearScore", "M_Bear", "W_Bear", "D_Bear"], ascending=False)
-else:
-    sector_df = sector_df.sort_values(["BullScore", "M_Bull", "W_Bull", "D_Bull"], ascending=False)
-
-st.dataframe(sector_df, use_container_width=True)
-
-st.divider()
-
-# -----------------------------
-# DRILLDOWN
-# -----------------------------
+# =========================
+# DRILLDOWN: TOP NAMES
+# =========================
 st.subheader("Drill into a sector (ranks candidates in bias direction + magnitude)")
-choice = st.selectbox("Choose a sector:", options=list(SECTOR_ETFS.keys()))
-etf = SECTOR_ETFS[choice]
-tickers = get_holdings(etf)
 
-st.write(f"Bias: **{bias}** | Strength: **{strength}/100** | Bull-Bear diff: **{diff:.0f}**")
-st.write(f"Selected: **{choice} ({etf})** — tickers in list: **{len(tickers)}**")
+sector_choice = st.selectbox("Choose a sector:", options=list(SECTOR_TICKERS.keys()), index=0)
+tickers = SECTOR_TICKERS.get(sector_choice, [])
+st.write(f"Selected: **{sector_choice}** ({SECTOR_ETFS.get(sector_choice,'')}) — tickers in list: **{len(tickers)}**")
 
-max_names = st.slider("How many tickers to scan", 5, len(tickers), min(15, len(tickers)), step=5)
+scan_n = st.slider("How many tickers to scan", min_value=5, max_value=len(tickers), value=min(15, len(tickers)))
 
-with st.spinner("Scanning tickers..."):
-    rows = []
-    for t in tickers[:max_names]:
-        sig = signals_all(t)
-        setup_score = rank_score(sig, bias)
+scan_list = tickers[:scan_n]
 
-        if require_bias:
-            if bias == "SHORT":
-                if not (sig["M_Bear"] or sig["W_Bear"]):
-                    continue
-            else:
-                if not (sig["M_Bull"] or sig["W_Bull"]):
-                    continue
+# Build candidate rows
+cand_rows: List[Dict] = []
+for t in scan_list:
+    d = get_hist(t)
+    if d.empty:
+        continue
 
-        if only_inside and not (sig["D_Inside"] or sig["W_Inside"]):
+    d_tf, w_tf, m_tf = tf_frames(d)
+    flags = compute_flags(d_tf, w_tf, m_tf)
+
+    # filters
+    if require_alignment and bias in ("LONG","SHORT") and not alignment_ok(bias, flags):
+        continue
+
+    if only_inside and not (flags["D_Inside"] or flags["W_Inside"]):
+        continue
+
+    if only_212:
+        if bias == "LONG" and not (flags["D_212Up"] or flags["W_212Up"]):
+            continue
+        if bias == "SHORT" and not (flags["D_212Dn"] or flags["W_212Dn"]):
             continue
 
-        if only_212:
-            if bias == "SHORT" and not (sig["D_212Dn"] or sig["W_212Dn"]):
-                continue
-            if bias != "SHORT" and not (sig["D_212Up"] or sig["W_212Up"]):
-                continue
+    # If market is MIXED, we still show matches but we don't try to force direction
+    eff_bias = bias if bias in ("LONG","SHORT") else "LONG"
 
-        tf, entry, stop = pick_entry_stop(sig, bias)
+    tf, entry, stop = best_trigger(eff_bias, d_tf, w_tf)
+    rr, atrp, room, compression = magnitude_metrics(eff_bias, d_tf, entry, stop)
 
-        # Only keep candidates relevant to bias
-        if bias == "SHORT":
-            relevant = (
-                sig["D_Bear"] or sig["W_Bear"] or sig["M_Bear"] or
-                sig["D_212Dn"] or sig["W_212Dn"] or
-                sig["D_Inside"] or sig["W_Inside"]
-            )
-        else:
-            relevant = (
-                sig["D_Bull"] or sig["W_Bull"] or sig["M_Bull"] or
-                sig["D_212Up"] or sig["W_212Up"] or
-                sig["D_Inside"] or sig["W_Inside"]
-            )
+    setup_score, mag_score, total_score = calc_scores(eff_bias, flags, rr, atrp, compression, entry, stop)
 
-        if not relevant:
-            continue
+    cand = {
+        "Ticker": t,
+        "SetupScore": setup_score,
+        "MagScore": mag_score,
+        "TotalScore": total_score,
+        "TF": tf,
+        "Entry": None if entry is None else round(float(entry), 2),
+        "Stop": None if stop is None else round(float(stop), 2),
+        "Room": None if room is None else round(float(room), 2),
+        "RR": None if rr is None else round(float(rr), 2),
+        "ATR%": None if atrp is None else round(float(atrp), 2),
+    }
+    cand.update(flags)
+    cand_rows.append(cand)
 
-        atr, atr_pct, room, rr, mag_score = (None, None, None, None, 0)
-        if entry is not None and stop is not None and tf is not None:
-            atr, atr_pct, room, rr, mag_score = magnitude_metrics(t, bias, entry, stop, tf, sig)
-
-        total = setup_score + mag_score
-
-        rows.append({
-            "Ticker": t,
-            "SetupScore": setup_score,
-            "MagScore": mag_score,
-            "TotalScore": total,
-            "TF": tf,
-            "Entry": entry,
-            "Stop": stop,
-            "Room": room,
-            "RR": rr,
-            "ATR%": atr_pct,
-
-            # bias-relevant flags
-            "W_Inside": sig["W_Inside"],
-            "D_Inside": sig["D_Inside"],
-            "W_212Up": sig["W_212Up"],
-            "D_212Up": sig["D_212Up"],
-            "W_212Dn": sig["W_212Dn"],
-            "D_212Dn": sig["D_212Dn"],
-            "M_Bull": sig["M_Bull"],
-            "W_Bull": sig["W_Bull"],
-            "D_Bull": sig["D_Bull"],
-            "M_Bear": sig["M_Bear"],
-            "W_Bear": sig["W_Bear"],
-            "D_Bear": sig["D_Bear"],
-        })
-
-if not rows:
-    st.info("No matches found with your filters. Try scanning more tickers or loosening alignment requirement.")
+cand_df = pd.DataFrame(cand_rows)
+if cand_df.empty:
+    st.info("No matches under current filters. Loosen filters (or market is in drift/chop).")
 else:
-    names_df = pd.DataFrame(rows).sort_values(["TotalScore"], ascending=False)
+    cand_df = cand_df.sort_values("TotalScore", ascending=False)
 
-    st.subheader(f"Top Trade Ideas (best {top_n}) — Bias: {bias} (ranked by TotalScore)")
-    top_df = names_df.head(top_n).copy()
+    st.markdown(f"### Top Trade Ideas (best {top_k}) — Bias: **{bias}** (ranked by TotalScore)")
+    top_df = cand_df.head(top_k)[[
+        "Ticker","TotalScore","SetupScore","MagScore","TF","Entry","Stop","Room","RR","ATR%",
+        "W_212Up","D_212Up","M_Bull","W_Bull","D_Bull","W_Inside","D_Inside",
+        "W_212Dn","D_212Dn","M_Bear","W_Bear","D_Bear"
+    ]]
+    st.dataframe(top_df, use_container_width=True, hide_index=True)
 
-    if bias == "SHORT":
-        cols = ["Ticker","TotalScore","SetupScore","MagScore","TF","Entry","Stop","Room","RR","ATR%","W_212Dn","D_212Dn","M_Bear","W_Bear","D_Bear","W_Inside","D_Inside"]
+    # Trade of the Day
+    st.markdown("### 🎯 Trade of the Day (best TotalScore + valid trigger)")
+    valid = cand_df.dropna(subset=["Entry","Stop","RR"]).copy()
+    valid = valid[valid["RR"] >= 2.0]
+    if valid.empty:
+        st.warning("No valid trigger found (needs Inside Bar levels). Use Top Ideas and wait for an Inside Bar trigger.")
     else:
-        cols = ["Ticker","TotalScore","SetupScore","MagScore","TF","Entry","Stop","Room","RR","ATR%","W_212Up","D_212Up","M_Bull","W_Bull","D_Bull","W_Inside","D_Inside"]
-
-    st.dataframe(top_df[cols], use_container_width=True)
-
-    st.divider()
-    st.subheader("🎯 Trade of the Day (best TotalScore + valid trigger)")
-
-    best = best_trade_candidate(names_df)
-    if best is None or pd.isna(best.get("Entry")) or pd.isna(best.get("Stop")):
-        st.info("No valid trigger found (needs Inside Bar levels). Use Top Ideas and wait for an Inside Bar trigger.")
-    else:
-        direction = "SHORT" if bias == "SHORT" else "LONG"
-        entry = float(best["Entry"]); stop = float(best["Stop"])
-        rr = best["RR"]; atrp = best["ATR%"]; room = best["Room"]
-        rr_txt = f"{rr:.2f}R" if pd.notna(rr) else "n/a"
-        atr_txt = f"{atrp:.2f}%" if pd.notna(atrp) else "n/a"
-        room_txt = f"{room:.2f}" if pd.notna(room) else "n/a"
+        best = valid.iloc[0]
         st.success(
-            f"{direction} {best['Ticker']} | Entry: {entry:.2f} | Stop: {stop:.2f} | "
-            f"TF: {best['TF']} | Room: {room_txt} | RR: {rr_txt} | ATR%: {atr_txt}"
+            f"**{best['Ticker']}** | Bias: **{bias}** | TF: **{best['TF']}** | "
+            f"Entry: **{best['Entry']}** | Stop: **{best['Stop']}** | "
+            f"RR: **{best['RR']}** | ATR%: **{best['ATR%']}**"
         )
 
-    st.subheader("All Matches (ranked by TotalScore)")
-    st.dataframe(names_df, use_container_width=True)
+    st.markdown("### All Matches (ranked by TotalScore)")
+    st.dataframe(
+        cand_df[[
+            "Ticker","SetupScore","MagScore","TotalScore","TF","Entry","Stop","Room","RR","ATR%",
+            "W_Inside","D_Inside","W_212Up","D_212Up","W_212Dn","D_212Dn",
+            "M_Bull","W_Bull","D_Bull","M_Bear","W_Bear","D_Bear"
+        ]],
+        use_container_width=True,
+        hide_index=True
+    )
 
-# -----------------------------
-# QUICK MARKET READ
-# -----------------------------
-st.divider()
+# =========================
+# QUICK MARKET READ (SHORT + PUNCHY)
+# =========================
 st.subheader("Quick Market Read")
 
-if bias == "LONG":
-    st.write(f"Bias: **LONG ✅** | Strength: **{strength}/100**")
-elif bias == "SHORT":
-    st.write(f"Bias: **SHORT 🛑** | Strength: **{strength}/100**")
-else:
-    st.write(f"Bias: **MIXED ⚠️** | Strength: **{strength}/100**")
+# Strong sectors (bias direction)
+strong_sectors = []
+weak_sectors = []
+for _, r in sectors_df.iterrows():
+    if bias == "LONG":
+        if r["BullScore"] >= 4:
+            strong_sectors.append(f"{r['Sector']}({r['ETF']})")
+        if r["BearScore"] >= 4:
+            weak_sectors.append(f"{r['Sector']}({r['ETF']})")
+    elif bias == "SHORT":
+        if r["BearScore"] >= 4:
+            strong_sectors.append(f"{r['Sector']}({r['ETF']})")
+        if r["BullScore"] >= 4:
+            weak_sectors.append(f"{r['Sector']}({r['ETF']})")
+    else:
+        # mixed
+        dom = r["BullScore"] - r["BearScore"]
+        if dom >= 4:
+            strong_sectors.append(f"{r['Sector']}({r['ETF']})")
+        if dom <= -4:
+            weak_sectors.append(f"{r['Sector']}({r['ETF']})")
 
-st.write(f"**{top_sectors_text(sector_df, bias=bias, n=3)}**")
-st.write(f"**{rotation_text(sector_df, bias=bias, n=3)}**")
-
+# Rotation approximation
+rotation_in = []
+rotation_out = []
 if bias == "LONG":
-    st.success("Plan: LONG only. Prioritize Weekly 2-1-2 UP + Inside Bar breaks. Prefer higher RR + ATR%.")
+    rotation_in = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.head(3).iterrows()]
+    rotation_out = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.tail(3).iterrows()]
 elif bias == "SHORT":
-    st.error("Plan: SHORT only. Prioritize Weekly 2-1-2 DOWN + Inside Bar breakdowns. Prefer higher RR + ATR%.")
+    rotation_in = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.head(3).iterrows()]
+    rotation_out = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.tail(3).iterrows()]
+
+# Plan line
+if bias == "MIXED" or strength < 50:
+    plan = "Plan: Defensive. Trade smaller, or wait for A+ triggers (inside bars / clean 2-1-2)."
+    badge = "🟠"
+elif bias == "LONG":
+    plan = "Plan: LONG only. Prioritize Weekly 2-1-2 UP + Inside Bar breaks. Prefer higher RR + ATR%."
+    badge = "🟢"
 else:
-    st.warning("Plan: Mixed tape. Trade fewer setups or wait for a decisive LONG/SHORT bias.")
+    plan = "Plan: SHORT only. Prioritize Weekly 2-1-2 DN + Inside Bar breaks. Prefer higher RR + ATR%."
+    badge = "🔴"
+
+st.write(f"Bias: **{bias}** {badge} | Strength: **{strength}/100** | Bull–Bear diff: **{bull_bear_diff}**")
+
+if strong_sectors:
+    st.write("Strong Sectors:", ", ".join(strong_sectors[:5]))
+else:
+    st.write("Strong Sectors: (none screaming)")
+
+if rotation_in and rotation_out:
+    st.write(f"Rotation IN: {', '.join(rotation_in)} | OUT: {', '.join(rotation_out)}")
+
+st.success(plan)
 
 st.caption(
-    "Magnitude = Room-to-run vs Risk (RR) + ATR% (movement) + Compression (inside bar tightness vs ATR). "
-    "Targets use the last ~63 trading days high/low as a practical reference."
+    "Trigger logic: If Inside Bar exists, LONG = buy break of High / stop below Low. "
+    "SHORT = sell break of Low / stop above High. Weekly triggers are preferred when available."
 )
