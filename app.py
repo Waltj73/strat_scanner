@@ -11,10 +11,7 @@ import yfinance as yf
 # =========================
 # STREAMLIT CONFIG
 # =========================
-st.set_page_config(
-    page_title="STRAT Regime Scanner",
-    layout="wide",
-)
+st.set_page_config(page_title="STRAT Regime Scanner", layout="wide")
 
 st.title("STRAT Regime Scanner (Auto LONG/SHORT + Magnitude)")
 st.caption("Bias from market regime. Ranks tickers by setup quality AND magnitude (RR + ATR% + compression).")
@@ -34,11 +31,9 @@ with st.expander("Filters", expanded=True):
     with colD:
         top_k = st.slider("Top Picks count", min_value=3, max_value=8, value=5)
 
-    colR1, colR2 = st.columns([1, 3])
-    with colR1:
-        if st.button("Refresh data"):
-            st.cache_data.clear()
-            st.rerun()
+    if st.button("Refresh data"):
+        st.cache_data.clear()
+        st.rerun()
 
 st.caption(f"Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
 
@@ -66,8 +61,6 @@ SECTOR_ETFS = {
     "Health Care": "XLV",
 }
 
-# Practical, stable “top liquid names” lists (no scraping required; Streamlit Cloud-safe).
-# You can edit/expand these anytime.
 SECTOR_TICKERS: Dict[str, List[str]] = {
     "Energy": ["XOM","CVX","COP","EOG","SLB","HAL","PSX","MPC","VLO","OXY","KMI","WMB","BKR","DVN","PXD"],
     "Comm Services": ["GOOGL","GOOG","META","NFLX","TMUS","VZ","T","DIS","CMCSA","CHTR","EA","TTWO","SPOT","ROKU","SNAP"],
@@ -82,30 +75,100 @@ SECTOR_TICKERS: Dict[str, List[str]] = {
     "Health Care": ["UNH","JNJ","LLY","PFE","MRK","ABBV","TMO","ABT","DHR","BMY","AMGN","GILD","ISRG","VRTX","MDT"],
 }
 
+REQUIRED_COLS = ["Open", "High", "Low", "Close", "Volume"]
+
 # =========================
-# DATA FETCH (CACHED)
+# DATA FETCH (CACHED) — HARDENED FOR STREAMLIT CLOUD
 # =========================
+def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    """
+    yfinance sometimes returns MultiIndex columns on some environments.
+    We normalize to flat OHLCV columns: Open/High/Low/Close/Volume.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    # Ensure DateTimeIndex
+    if not isinstance(df.index, pd.DatetimeIndex):
+        try:
+            df.index = pd.to_datetime(df.index)
+        except Exception:
+            return pd.DataFrame()
+
+    if isinstance(df.columns, pd.MultiIndex):
+        # Common shapes:
+        # 1) columns = (field, ticker)
+        # 2) columns = (ticker, field)
+        lvl0 = df.columns.get_level_values(0)
+        lvl1 = df.columns.get_level_values(1)
+
+        # If level0 looks like fields (Open/High/Low/Close)
+        if set(REQUIRED_COLS).issubset(set(lvl0)):
+            # pick the ticker slice if possible
+            if ticker in set(lvl1):
+                df = df.xs(ticker, axis=1, level=1, drop_level=True)
+            else:
+                # if only one ticker, just drop the other level
+                df.columns = [c[0] for c in df.columns]
+
+        # If level1 looks like fields
+        elif set(REQUIRED_COLS).issubset(set(lvl1)):
+            if ticker in set(lvl0):
+                df = df.xs(ticker, axis=1, level=0, drop_level=True)
+            else:
+                df.columns = [c[1] for c in df.columns]
+        else:
+            # Fallback: flatten tuples -> first item
+            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+
+    # Sometimes yfinance returns lowercase or Adj Close variants; normalize if needed
+    # Keep only required columns
+    missing = [c for c in REQUIRED_COLS if c not in df.columns]
+    if missing:
+        # try common alternative names
+        rename_map = {}
+        for c in df.columns:
+            if isinstance(c, str):
+                if c.lower() == "open":
+                    rename_map[c] = "Open"
+                if c.lower() == "high":
+                    rename_map[c] = "High"
+                if c.lower() == "low":
+                    rename_map[c] = "Low"
+                if c.lower() == "close":
+                    rename_map[c] = "Close"
+                if c.lower() == "volume":
+                    rename_map[c] = "Volume"
+        if rename_map:
+            df = df.rename(columns=rename_map)
+
+    # Final enforce
+    if not set(REQUIRED_COLS).issubset(set(df.columns)):
+        return pd.DataFrame()
+
+    df = df[REQUIRED_COLS].dropna()
+    return df
+
+
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def get_hist(ticker: str, period: str = "3y") -> pd.DataFrame:
     """
-    Streamlit Cloud-safe cached fetch.
+    Cached download; returns a clean OHLCV DataFrame.
     """
-    df = yf.download(
-        ticker,
-        period=period,
-        interval="1d",
-        auto_adjust=False,
-        progress=False,
-        threads=True,
-    )
-    if df is None or df.empty:
+    try:
+        raw = yf.download(
+            ticker,
+            period=period,
+            interval="1d",
+            auto_adjust=False,
+            progress=False,
+            threads=True,
+        )
+    except Exception:
         return pd.DataFrame()
-    df = df.dropna()
-    # Ensure OHLC columns exist
-    for c in ["Open", "High", "Low", "Close", "Volume"]:
-        if c not in df.columns:
-            return pd.DataFrame()
-    return df
+
+    return _flatten_yf_columns(raw, ticker)
+
 
 def resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     """
@@ -142,9 +205,7 @@ def is_red(cur: pd.Series) -> bool:
 def last_two(df: pd.DataFrame) -> Optional[Tuple[pd.Series, pd.Series]]:
     if df is None or df.empty or len(df) < 2:
         return None
-    cur = df.iloc[-1]
-    prev = df.iloc[-2]
-    return cur, prev
+    return df.iloc[-1], df.iloc[-2]
 
 def strat_bull(df: pd.DataFrame) -> bool:
     pair = last_two(df)
@@ -168,23 +229,23 @@ def strat_inside(df: pd.DataFrame) -> bool:
     return is_inside_bar(cur, prev)
 
 def strat_212_up(df: pd.DataFrame) -> bool:
-    if df is None or df.empty or len(df) < 3:
+    if df is None or df.empty or len(df) < 4:
         return False
     a, b, c = df.iloc[-3], df.iloc[-2], df.iloc[-1]
-    return is_2up(a, df.iloc[-4] if len(df) >= 4 else a) and is_inside_bar(b, a) and is_2up(c, b)
+    prev_a = df.iloc[-4]
+    return is_2up(a, prev_a) and is_inside_bar(b, a) and is_2up(c, b)
 
 def strat_212_dn(df: pd.DataFrame) -> bool:
-    if df is None or df.empty or len(df) < 3:
+    if df is None or df.empty or len(df) < 4:
         return False
     a, b, c = df.iloc[-3], df.iloc[-2], df.iloc[-1]
-    return is_2dn(a, df.iloc[-4] if len(df) >= 4 else a) and is_inside_bar(b, a) and is_2dn(c, b)
+    prev_a = df.iloc[-4]
+    return is_2dn(a, prev_a) and is_inside_bar(b, a) and is_2dn(c, b)
 
 def atr14(df: pd.DataFrame) -> float:
     if df is None or df.empty or len(df) < 20:
         return float("nan")
-    h = df["High"]
-    l = df["Low"]
-    c = df["Close"]
+    h, l, c = df["High"], df["Low"], df["Close"]
     prev_c = c.shift(1)
     tr = pd.concat([(h - l).abs(), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
     return float(tr.rolling(14).mean().iloc[-1])
@@ -219,44 +280,31 @@ def compute_flags(d: pd.DataFrame, w: pd.DataFrame, m: pd.DataFrame) -> Dict[str
     }
 
 def score_regime(flags: Dict[str, bool]) -> Tuple[int, int]:
-    """
-    Weighted bull/bear points.
-    """
     bull = 0
     bear = 0
-
-    # Trend / alignment
     bull += 3 if flags["M_Bull"] else 0
     bull += 2 if flags["W_Bull"] else 0
     bull += 1 if flags["D_Bull"] else 0
-
     bear += 3 if flags["M_Bear"] else 0
     bear += 2 if flags["W_Bear"] else 0
     bear += 1 if flags["D_Bear"] else 0
-
-    # Continuations
     bull += 2 if flags["W_212Up"] else 0
     bull += 1 if flags["D_212Up"] else 0
     bear += 2 if flags["W_212Dn"] else 0
     bear += 1 if flags["D_212Dn"] else 0
-
     return bull, bear
 
 def market_bias_and_strength(market_rows: List[Dict]) -> Tuple[str, int, int]:
     bull_total = sum(r["BullScore"] for r in market_rows)
     bear_total = sum(r["BearScore"] for r in market_rows)
     diff = bull_total - bear_total
-
-    # Convert diff to a 0–100 strength scale (simple and stable)
     strength = int(clamp(50 + diff * 5, 0, 100))
-
     if diff >= 3:
         bias = "LONG"
     elif diff <= -3:
         bias = "SHORT"
     else:
         bias = "MIXED"
-
     return bias, strength, diff
 
 def alignment_ok(bias: str, flags: Dict[str, bool]) -> bool:
@@ -266,30 +314,17 @@ def alignment_ok(bias: str, flags: Dict[str, bool]) -> bool:
         return flags["M_Bear"] or flags["W_Bear"]
     return False
 
-def setup_ok(bias: str, flags: Dict[str, bool]) -> bool:
-    if bias == "LONG":
-        return flags["D_Inside"] or flags["W_Inside"] or flags["D_212Up"] or flags["W_212Up"]
-    if bias == "SHORT":
-        return flags["D_Inside"] or flags["W_Inside"] or flags["D_212Dn"] or flags["W_212Dn"]
-    return False
-
 def best_trigger(bias: str, d: pd.DataFrame, w: pd.DataFrame) -> Tuple[Optional[str], Optional[float], Optional[float]]:
-    """
-    Prefer Weekly inside bar triggers if present; else Daily inside.
-    Returns (TF, entry, stop) for the bias direction.
-    """
-    # Weekly inside trigger
     if strat_inside(w) and len(w) >= 2:
-        cur, prev = w.iloc[-1], w.iloc[-2]
+        cur = w.iloc[-1]
         hi, lo = float(cur["High"]), float(cur["Low"])
         if bias == "LONG":
             return "W", hi, lo
         if bias == "SHORT":
             return "W", lo, hi
 
-    # Daily inside trigger
     if strat_inside(d) and len(d) >= 2:
-        cur, prev = d.iloc[-1], d.iloc[-2]
+        cur = d.iloc[-1]
         hi, lo = float(cur["High"]), float(cur["Low"])
         if bias == "LONG":
             return "D", hi, lo
@@ -299,13 +334,6 @@ def best_trigger(bias: str, d: pd.DataFrame, w: pd.DataFrame) -> Tuple[Optional[
     return None, None, None
 
 def magnitude_metrics(bias: str, d: pd.DataFrame, entry: Optional[float], stop: Optional[float]) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
-    """
-    Returns: (RR, ATR%, Room, Compression)
-    - RR uses target as a practical reference: 63-day high/low from daily frame.
-    - ATR% uses daily ATR14 / close.
-    - Room is distance to 63-day extreme from entry (in points).
-    - Compression uses inside-bar range relative to ATR (lower is tighter).
-    """
     if entry is None or stop is None or d is None or d.empty or len(d) < 80:
         return None, None, None, None
 
@@ -315,8 +343,6 @@ def magnitude_metrics(bias: str, d: pd.DataFrame, entry: Optional[float], stop: 
         return None, None, None, None
 
     atrp = (atr / close) * 100.0
-
-    # 63-day extremes
     hi63 = float(d["High"].rolling(63).max().iloc[-1])
     lo63 = float(d["Low"].rolling(63).min().iloc[-1])
 
@@ -331,12 +357,8 @@ def magnitude_metrics(bias: str, d: pd.DataFrame, entry: Optional[float], stop: 
         risk = stop - entry
         reward = entry - target
 
-    if risk <= 0:
-        rr = None
-    else:
-        rr = reward / risk if reward > 0 else 0.0
+    rr = None if risk <= 0 else (reward / risk if reward > 0 else 0.0)
 
-    # Compression: if last bar is inside, use its range vs ATR; else None
     compression = None
     if strat_inside(d) and len(d) >= 2:
         cur = d.iloc[-1]
@@ -354,15 +376,9 @@ def calc_scores(
     entry: Optional[float],
     stop: Optional[float],
 ) -> Tuple[int, int, int]:
-    """
-    SetupScore: structure quality
-    MagScore: RR/ATR%/compression-based
-    TotalScore: Setup + Mag
-    """
     setup = 0
     mag = 0
 
-    # Base setup
     if bias == "LONG":
         setup += 30 if flags["M_Bull"] else 0
         setup += 20 if flags["W_Bull"] else 0
@@ -376,11 +392,9 @@ def calc_scores(
         setup += 20 if flags["W_212Dn"] else 0
         setup += 10 if flags["D_212Dn"] else 0
 
-    # Compression bonus (inside bars)
     setup += 10 if flags["W_Inside"] else 0
     setup += 5 if flags["D_Inside"] else 0
 
-    # Magnitude score (stable and simple)
     if rr is not None:
         if rr >= 3:
             mag += 35
@@ -397,7 +411,6 @@ def calc_scores(
         elif atrp >= 1:
             mag += 5
 
-    # Tighter compression is better (if present)
     if compression is not None:
         if compression <= 0.6:
             mag += 15
@@ -406,7 +419,6 @@ def calc_scores(
         elif compression <= 1.2:
             mag += 3
 
-    # Valid trigger boosts
     if entry is not None and stop is not None:
         mag += 5
 
@@ -468,13 +480,11 @@ for sector, etf in SECTOR_ETFS.items():
 
 sectors_df = pd.DataFrame(sector_rows)
 
-# Rank after bias is known
 if bias == "LONG":
     sectors_df = sectors_df.sort_values(["BullScore","BearScore"], ascending=[False, True])
 elif bias == "SHORT":
     sectors_df = sectors_df.sort_values(["BearScore","BullScore"], ascending=[False, True])
 else:
-    # Mixed: show by absolute dominance
     sectors_df["Dominance"] = (sectors_df["BullScore"] - sectors_df["BearScore"]).abs()
     sectors_df = sectors_df.sort_values("Dominance", ascending=False)
 
@@ -491,7 +501,7 @@ st.dataframe(
 )
 
 # =========================
-# DRILLDOWN: TOP NAMES
+# DRILLDOWN
 # =========================
 st.subheader("Drill into a sector (ranks candidates in bias direction + magnitude)")
 
@@ -500,10 +510,8 @@ tickers = SECTOR_TICKERS.get(sector_choice, [])
 st.write(f"Selected: **{sector_choice}** ({SECTOR_ETFS.get(sector_choice,'')}) — tickers in list: **{len(tickers)}**")
 
 scan_n = st.slider("How many tickers to scan", min_value=5, max_value=len(tickers), value=min(15, len(tickers)))
-
 scan_list = tickers[:scan_n]
 
-# Build candidate rows
 cand_rows: List[Dict] = []
 for t in scan_list:
     d = get_hist(t)
@@ -513,25 +521,20 @@ for t in scan_list:
     d_tf, w_tf, m_tf = tf_frames(d)
     flags = compute_flags(d_tf, w_tf, m_tf)
 
-    # filters
     if require_alignment and bias in ("LONG","SHORT") and not alignment_ok(bias, flags):
         continue
-
     if only_inside and not (flags["D_Inside"] or flags["W_Inside"]):
         continue
-
     if only_212:
         if bias == "LONG" and not (flags["D_212Up"] or flags["W_212Up"]):
             continue
         if bias == "SHORT" and not (flags["D_212Dn"] or flags["W_212Dn"]):
             continue
 
-    # If market is MIXED, we still show matches but we don't try to force direction
     eff_bias = bias if bias in ("LONG","SHORT") else "LONG"
 
     tf, entry, stop = best_trigger(eff_bias, d_tf, w_tf)
     rr, atrp, room, compression = magnitude_metrics(eff_bias, d_tf, entry, stop)
-
     setup_score, mag_score, total_score = calc_scores(eff_bias, flags, rr, atrp, compression, entry, stop)
 
     cand = {
@@ -563,7 +566,6 @@ else:
     ]]
     st.dataframe(top_df, use_container_width=True, hide_index=True)
 
-    # Trade of the Day
     st.markdown("### 🎯 Trade of the Day (best TotalScore + valid trigger)")
     valid = cand_df.dropna(subset=["Entry","Stop","RR"]).copy()
     valid = valid[valid["RR"] >= 2.0]
@@ -589,43 +591,16 @@ else:
     )
 
 # =========================
-# QUICK MARKET READ (SHORT + PUNCHY)
+# QUICK MARKET READ
 # =========================
 st.subheader("Quick Market Read")
 
-# Strong sectors (bias direction)
 strong_sectors = []
-weak_sectors = []
-for _, r in sectors_df.iterrows():
-    if bias == "LONG":
-        if r["BullScore"] >= 4:
-            strong_sectors.append(f"{r['Sector']}({r['ETF']})")
-        if r["BearScore"] >= 4:
-            weak_sectors.append(f"{r['Sector']}({r['ETF']})")
-    elif bias == "SHORT":
-        if r["BearScore"] >= 4:
-            strong_sectors.append(f"{r['Sector']}({r['ETF']})")
-        if r["BullScore"] >= 4:
-            weak_sectors.append(f"{r['Sector']}({r['ETF']})")
-    else:
-        # mixed
-        dom = r["BullScore"] - r["BearScore"]
-        if dom >= 4:
-            strong_sectors.append(f"{r['Sector']}({r['ETF']})")
-        if dom <= -4:
-            weak_sectors.append(f"{r['Sector']}({r['ETF']})")
-
-# Rotation approximation
-rotation_in = []
-rotation_out = []
 if bias == "LONG":
-    rotation_in = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.head(3).iterrows()]
-    rotation_out = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.tail(3).iterrows()]
+    strong_sectors = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.head(3).iterrows()]
 elif bias == "SHORT":
-    rotation_in = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.head(3).iterrows()]
-    rotation_out = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.tail(3).iterrows()]
+    strong_sectors = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.head(3).iterrows()]
 
-# Plan line
 if bias == "MIXED" or strength < 50:
     plan = "Plan: Defensive. Trade smaller, or wait for A+ triggers (inside bars / clean 2-1-2)."
     badge = "🟠"
@@ -637,15 +612,7 @@ else:
     badge = "🔴"
 
 st.write(f"Bias: **{bias}** {badge} | Strength: **{strength}/100** | Bull–Bear diff: **{bull_bear_diff}**")
-
-if strong_sectors:
-    st.write("Strong Sectors:", ", ".join(strong_sectors[:5]))
-else:
-    st.write("Strong Sectors: (none screaming)")
-
-if rotation_in and rotation_out:
-    st.write(f"Rotation IN: {', '.join(rotation_in)} | OUT: {', '.join(rotation_out)}")
-
+st.write("Strong Sectors:", ", ".join(strong_sectors) if strong_sectors else "(none screaming)")
 st.success(plan)
 
 st.caption(
