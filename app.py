@@ -12,7 +12,6 @@ import yfinance as yf
 # STREAMLIT CONFIG + NAV
 # =========================
 st.set_page_config(page_title="STRAT Regime Scanner", layout="wide")
-
 page = st.sidebar.radio("Navigation", ["Scanner", "📘 User Guide"])
 
 # =========================
@@ -23,7 +22,7 @@ def show_user_guide():
 
     st.markdown("""
 ## What this scanner is for
-This tool helps you **stop guessing** and trade with structure:
+This tool helps you trade with structure:
 
 1) **Market direction** (risk-on vs risk-off)  
 2) **Sector strength** (where money is rotating)  
@@ -34,134 +33,73 @@ This tool helps you **stop guessing** and trade with structure:
 ## The order matters
 **Market → Sector → Stock → Setup → Trigger**
 
-If you skip steps, you’ll end up taking random trades that don’t align with the environment.
-
 ---
 
-## Section 1: Filters (how to use them)
+## Section 1: Filters
 **ONLY Inside Bars (D or W)**  
-- Shows stocks that have a clean **breakout trigger**.
-- Best when you want “set orders + walk away” trades.
+- Shows names with clean breakout triggers.
 
 **ONLY 2-1-2 forming (bias direction)**  
-- Shows continuation setups forming.
-- Great in trending conditions.
+- Continuation setups forming.
 
 **Require Monthly OR Weekly alignment (bias direction)** *(recommended ON)*  
-- Filters out weak names.
-- Keeps you trading with the larger timeframe.
+- Filters weak names; keeps you aligned.
 
 **Top Picks count**  
-- Controls how many top candidates appear.
-
-**Refresh data button**  
-- Clears cache and pulls fresh data immediately.
+- How many top candidates show.
 
 ---
 
-## Section 2: Market Regime (your “trade direction”)
-The Market Regime table checks:
-- **SPY / QQQ / IWM / DIA**
-- Daily / Weekly / Monthly bull vs bear
-- 2-1-2 patterns
+## Section 2: Market Regime
+Checks **SPY / QQQ / IWM / DIA** on Daily/Weekly/Monthly + 2-1-2.
 
-### How to read bias
-If the market is:
-- **LONG** → prioritize long setups only
-- **SHORT** → prioritize short setups only
-- **MIXED** → be selective or reduce size
+**Bias**
+- LONG → prioritize longs
+- SHORT → prioritize shorts
+- MIXED → be selective / reduce size
 
-Strength (0–100) is a simple “how clear is the bias?” gauge.
+**Strength (0–100)** = clarity of regime.
 
 ---
 
-## Section 3: Sector Ranking (where the edge is)
-Sectors are ranked **after bias is known**.
-
-### How to use it
-- In **LONG** bias: focus the **top 1–3 sectors**
-- In **SHORT** bias: focus the **weakest sectors** (bear leadership)
-
-This is how you catch “leaders” instead of random names.
+## Section 3: Sector Ranking
+Trade where the money is.
+- LONG bias → top sectors
+- SHORT bias → weakest sectors
 
 ---
 
-## Section 4: Drilldown (how to pick actual trades)
-Pick a sector → scan the tickers inside it.
-
-The scanner ranks candidates by:
-- **SetupScore** = alignment + STRAT structure + trigger readiness
-- **MagScore** = movement potential (ATR%) + room-to-run + compression
-- **TotalScore** = SetupScore + MagScore
+## Section 4: Drilldown
+Ranks names using:
+- **SetupScore**
+- **MagScore** (RR + ATR% + compression)
+- **TotalScore**
 
 ---
 
-## Section 5: Trigger Levels (Entry / Stop)
-When the scanner shows TF/Entry/Stop, treat it like this:
-
+## Section 5: Trigger Levels
 **LONG**
-- Entry = break above inside bar high
+- Entry = break of inside bar high
 - Stop = below inside bar low
 
 **SHORT**
-- Entry = break below inside bar low
+- Entry = break of inside bar low
 - Stop = above inside bar high
 
-Weekly triggers are preferred (cleaner swings).
+Weekly triggers preferred.
 
 ---
 
-## Section 6: RR / Room / ATR%
-These help you avoid “dead trades.”
+## Daily routine (2–5 mins)
+1) Check Bias + Strength  
+2) Note top sectors  
+3) Drill into the best sector  
+4) Choose 1–3 names with Entry/Stop + RR ≥ 2  
+5) Sanity check chart + news/earnings  
+6) Place trigger orders or wait  
 
-- **RR**: estimated reward-to-risk (higher is better)
-- **Room**: distance to a practical extreme (63-day high/low)
-- **ATR%**: how much the ticker typically moves (too low = slow)
-
-Good swing candidates usually have:
-- RR **≥ 2**
-- ATR% **≥ 1** (higher is fine as long as structure is clean)
-
----
-
-## Trade of the Day
-This is simply:
-- best ranked setup
-- that also has a valid trigger (Entry/Stop)
-- and RR meets your threshold
-
-If it says “none”, that’s a feature: **don’t force it.**
-
----
-
-## Daily routine (2–5 minutes)
-1) Open app  
-2) Check **Bias + Strength**  
-3) Note **top 1–3 sectors**  
-4) Drill into strongest sector  
-5) Pick **1–3 names** with Entry/Stop and RR ≥ 2  
-6) Confirm chart sanity (wicks, gaps, earnings)  
-7) Place trigger orders (or wait)
-
----
-
-## When NOT to trade
-- Bias is MIXED and strength is low
-- No inside triggers exist
-- The name is gapping wildly / news-driven
-- Earnings within a few days (optional filter later)
-
----
-
-## Bottom line
-This scanner’s job is not to “predict” — it’s to:
-- **filter noise**
-- **keep you aligned**
-- **give clean trigger levels**
-- **keep you patient**
 """)
 
-# If guide selected, show it and stop
 if page == "📘 User Guide":
     show_user_guide()
     st.stop()
@@ -233,27 +171,43 @@ SECTOR_TICKERS: Dict[str, List[str]] = {
 REQUIRED_COLS = ["Open", "High", "Low", "Close", "Volume"]
 
 # =========================
-# DATA FETCH (CACHED) — HARDENED
+# DATA FETCH (CACHED) — HARDENED FOR CLOUD
 # =========================
+def _ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index, errors="coerce")
+    df = df[~df.index.isna()].copy()
+    # remove timezone (resample can be finicky depending on build)
+    try:
+        df.index = df.index.tz_localize(None)
+    except Exception:
+        pass
+    df = df.sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    return df
+
 def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
 
-    if not isinstance(df.index, pd.DatetimeIndex):
-        try:
-            df.index = pd.to_datetime(df.index)
-        except Exception:
-            return pd.DataFrame()
+    df = _ensure_datetime_index(df)
+    if df.empty:
+        return pd.DataFrame()
 
+    # yfinance sometimes returns MultiIndex columns (esp on cloud)
     if isinstance(df.columns, pd.MultiIndex):
         lvl0 = df.columns.get_level_values(0)
         lvl1 = df.columns.get_level_values(1)
 
+        # Case A: fields on level 0, ticker on level 1
         if set(REQUIRED_COLS).issubset(set(lvl0)):
             if ticker in set(lvl1):
                 df = df.xs(ticker, axis=1, level=1, drop_level=True)
             else:
                 df.columns = [c[0] for c in df.columns]
+        # Case B: fields on level 1, ticker on level 0
         elif set(REQUIRED_COLS).issubset(set(lvl1)):
             if ticker in set(lvl0):
                 df = df.xs(ticker, axis=1, level=0, drop_level=True)
@@ -262,29 +216,46 @@ def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
         else:
             df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
 
-    missing = [c for c in REQUIRED_COLS if c not in df.columns]
-    if missing:
-        rename_map = {}
-        for c in df.columns:
-            if isinstance(c, str):
-                lc = c.lower()
-                if lc == "open": rename_map[c] = "Open"
-                elif lc == "high": rename_map[c] = "High"
-                elif lc == "low": rename_map[c] = "Low"
-                elif lc == "close": rename_map[c] = "Close"
-                elif lc == "volume": rename_map[c] = "Volume"
-        if rename_map:
-            df = df.rename(columns=rename_map)
+    # Normalize column names
+    rename_map = {}
+    for c in df.columns:
+        if not isinstance(c, str):
+            continue
+        lc = c.lower()
+        if lc == "open": rename_map[c] = "Open"
+        elif lc == "high": rename_map[c] = "High"
+        elif lc == "low": rename_map[c] = "Low"
+        elif lc in ("close", "adj close", "adj_close", "adjclose"):
+            # Prefer Close, but if Close missing, use Adj Close as Close
+            rename_map[c] = "Close" if "Close" not in df.columns else c
+        elif lc == "volume": rename_map[c] = "Volume"
+    if rename_map:
+        df = df.rename(columns=rename_map)
 
+    # If Close missing but Adj Close exists, map it
+    if "Close" not in df.columns:
+        for alt in ["Adj Close", "adj close", "Adj_Close", "AdjClose"]:
+            if alt in df.columns:
+                df["Close"] = df[alt]
+                break
+
+    # Ensure Volume exists
     if "Volume" not in df.columns:
         df["Volume"] = 0
 
-    if not set(REQUIRED_COLS).issubset(set(df.columns)):
+    # Keep only required columns if present
+    needed = ["Open", "High", "Low", "Close", "Volume"]
+    if not set(needed).issubset(set(df.columns)):
         return pd.DataFrame()
 
-    df = df[REQUIRED_COLS].dropna(subset=["Open","High","Low","Close"])
-    return df
+    df = df[needed].copy()
 
+    # FORCE numeric to avoid pandas resample agg TypeError on cloud
+    for c in needed:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+    return df
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def get_hist(ticker: str, period: str = "3y") -> pd.DataFrame:
@@ -303,21 +274,43 @@ def get_hist(ticker: str, period: str = "3y") -> pd.DataFrame:
 
     return _flatten_yf_columns(raw, ticker)
 
-
 def resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """
+    Cloud-safe OHLC resample that won’t crash on object dtypes or weird input.
+    """
     if df is None or df.empty:
         return pd.DataFrame()
-    if not set(REQUIRED_COLS).issubset(df.columns):
+
+    df = _ensure_datetime_index(df)
+    if df.empty:
         return pd.DataFrame()
 
-    ohlc = df[["Open", "High", "Low", "Close"]].resample(rule).agg({
-        "Open": "first",
-        "High": "max",
-        "Low": "min",
-        "Close": "last",
-    })
-    vol = df[["Volume"]].resample(rule).sum()
-    out = pd.concat([ohlc, vol], axis=1).dropna(subset=["Open","High","Low","Close"])
+    # Enforce numeric again (belt + suspenders)
+    for c in ["Open", "High", "Low", "Close", "Volume"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+    if df.empty:
+        return pd.DataFrame()
+
+    def safe_first(x):
+        x = x.dropna()
+        return x.iloc[0] if len(x) else np.nan
+
+    def safe_last(x):
+        x = x.dropna()
+        return x.iloc[-1] if len(x) else np.nan
+
+    g = df.resample(rule)
+    out = pd.DataFrame({
+        "Open": g["Open"].apply(safe_first),
+        "High": g["High"].max(),
+        "Low": g["Low"].min(),
+        "Close": g["Close"].apply(safe_last),
+        "Volume": g["Volume"].sum(),
+    }).dropna(subset=["Open", "High", "Low", "Close"])
+
     return out
 
 # =========================
@@ -673,7 +666,6 @@ for t in scan_list:
 
     tf, entry, stop = best_trigger(eff_bias, d_tf, w_tf)
     rr, atrp, room, compression = magnitude_metrics(eff_bias, d_tf, entry, stop)
-
     setup_score, mag_score, total_score = calc_scores(eff_bias, flags, rr, atrp, compression, entry, stop)
 
     cand = {
@@ -734,15 +726,11 @@ else:
 # =========================
 st.subheader("Quick Market Read")
 
-if bias == "LONG":
-    rotation_in = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.head(3).iterrows()]
-    rotation_out = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.tail(3).iterrows()]
-elif bias == "SHORT":
+if bias in ("LONG","SHORT"):
     rotation_in = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.head(3).iterrows()]
     rotation_out = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.tail(3).iterrows()]
 else:
-    rotation_in = []
-    rotation_out = []
+    rotation_in, rotation_out = [], []
 
 if bias == "MIXED" or strength < 50:
     plan = "Plan: Defensive. Trade smaller, or wait for A+ triggers (inside bars / clean 2-1-2)."
@@ -755,12 +743,10 @@ else:
     badge = "🔴"
 
 st.write(f"Bias: **{bias}** {badge} | Strength: **{strength}/100** | Bull–Bear diff: **{bull_bear_diff}**")
-
 if rotation_in and rotation_out:
     st.write(f"Rotation IN: {', '.join(rotation_in)} | OUT: {', '.join(rotation_out)}")
 
 st.success(plan)
-
 st.caption(
     "Trigger logic: If Inside Bar exists, LONG = buy break of High / stop below Low. "
     "SHORT = sell break of Low / stop above High. Weekly triggers are preferred when available."
