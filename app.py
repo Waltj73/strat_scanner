@@ -18,86 +18,51 @@ page = st.sidebar.radio("Navigation", ["Scanner", "📘 User Guide"])
 # USER GUIDE PAGE
 # =========================
 def show_user_guide():
-    st.title("📘 STRAT Regime Scanner — Complete User Guide")
+    st.title("📘 STRAT Regime Scanner — User Guide")
 
     st.markdown("""
-## What this scanner is for
-This tool helps you trade with structure:
-
-1) **Market direction** (risk-on vs risk-off)  
-2) **Sector strength** (where money is rotating)  
-3) **Stock selection** (best setups with triggers + RR + magnitude)
-
----
-
-## The order matters
-**Market → Sector → Stock → Setup → Trigger**
+## What this scanner does
+This scanner gives you:
+- **Overall market bias** (LONG / SHORT / MIXED)
+- **Sector rotation** (where money is flowing)
+- **Ranked trade ideas** with **Entry / Stop / RR / ATR%**
+- A “**Trade of the Day**” when a valid trigger exists
 
 ---
 
-## Section 1: Filters
-**ONLY Inside Bars (D or W)**  
-- Shows names with clean breakout triggers.
+## How to use it (the order matters)
+**Market → Sector → Stock → Trigger**
 
-**ONLY 2-1-2 forming (bias direction)**  
-- Continuation setups forming.
-
-**Require Monthly OR Weekly alignment (bias direction)** *(recommended ON)*  
-- Filters weak names; keeps you aligned.
-
-**Top Picks count**  
-- How many top candidates show.
-
----
-
-## Section 2: Market Regime
-Checks **SPY / QQQ / IWM / DIA** on Daily/Weekly/Monthly + 2-1-2.
-
-**Bias**
-- LONG → prioritize longs
-- SHORT → prioritize shorts
-- MIXED → be selective / reduce size
-
-**Strength (0–100)** = clarity of regime.
+1) Check **Bias + Strength**
+2) Trade only in the **bias direction**
+3) Choose from **strong sectors (LONG)** or **weak sectors (SHORT)**
+4) Pick names with:
+   - Weekly alignment (preferred)
+   - Inside Bar trigger (best)
+   - RR ≥ 2 (minimum)
+   - ATR% not tiny (avoid dead names)
 
 ---
 
-## Section 3: Sector Ranking
-Trade where the money is.
-- LONG bias → top sectors
-- SHORT bias → weakest sectors
-
----
-
-## Section 4: Drilldown
-Ranks names using:
-- **SetupScore**
-- **MagScore** (RR + ATR% + compression)
-- **TotalScore**
-
----
-
-## Section 5: Trigger Levels
+## Trigger logic
 **LONG**
-- Entry = break of inside bar high
-- Stop = below inside bar low
+- Entry = break of Inside Bar HIGH
+- Stop = below Inside Bar LOW
 
 **SHORT**
-- Entry = break of inside bar low
-- Stop = above inside bar high
+- Entry = break of Inside Bar LOW
+- Stop = above Inside Bar HIGH
 
-Weekly triggers preferred.
+Weekly triggers are better than daily when available.
 
 ---
 
-## Daily routine (2–5 mins)
-1) Check Bias + Strength  
-2) Note top sectors  
-3) Drill into the best sector  
-4) Choose 1–3 names with Entry/Stop + RR ≥ 2  
-5) Sanity check chart + news/earnings  
-6) Place trigger orders or wait  
-
+## Quick routine (2–5 min)
+1) Bias + strength
+2) Top sectors
+3) Drill down
+4) Pick 1–3 names with valid triggers
+5) Confirm on chart, then place trigger orders
 """)
 
 if page == "📘 User Guide":
@@ -179,13 +144,23 @@ def _ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df.index, errors="coerce")
     df = df[~df.index.isna()].copy()
-    # remove timezone (resample can be finicky depending on build)
     try:
         df.index = df.index.tz_localize(None)
     except Exception:
         pass
     df = df.sort_index()
     df = df[~df.index.duplicated(keep="last")]
+    return df
+
+def _dedupe_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure unique columns. If duplicates exist, keep first occurrence.
+    This prevents df['Open'] returning a DataFrame (which breaks pd.to_numeric).
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+    if df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated(keep="first")].copy()
     return df
 
 def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
@@ -196,18 +171,16 @@ def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
-    # yfinance sometimes returns MultiIndex columns (esp on cloud)
+    # MultiIndex handling
     if isinstance(df.columns, pd.MultiIndex):
         lvl0 = df.columns.get_level_values(0)
         lvl1 = df.columns.get_level_values(1)
 
-        # Case A: fields on level 0, ticker on level 1
         if set(REQUIRED_COLS).issubset(set(lvl0)):
             if ticker in set(lvl1):
                 df = df.xs(ticker, axis=1, level=1, drop_level=True)
             else:
                 df.columns = [c[0] for c in df.columns]
-        # Case B: fields on level 1, ticker on level 0
         elif set(REQUIRED_COLS).issubset(set(lvl1)):
             if ticker in set(lvl0):
                 df = df.xs(ticker, axis=1, level=0, drop_level=True)
@@ -216,7 +189,7 @@ def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
         else:
             df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
 
-    # Normalize column names
+    # Normalize names
     rename_map = {}
     for c in df.columns:
         if not isinstance(c, str):
@@ -226,9 +199,9 @@ def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
         elif lc == "high": rename_map[c] = "High"
         elif lc == "low": rename_map[c] = "Low"
         elif lc in ("close", "adj close", "adj_close", "adjclose"):
-            # Prefer Close, but if Close missing, use Adj Close as Close
             rename_map[c] = "Close" if "Close" not in df.columns else c
         elif lc == "volume": rename_map[c] = "Volume"
+
     if rename_map:
         df = df.rename(columns=rename_map)
 
@@ -243,15 +216,18 @@ def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     if "Volume" not in df.columns:
         df["Volume"] = 0
 
-    # Keep only required columns if present
     needed = ["Open", "High", "Low", "Close", "Volume"]
     if not set(needed).issubset(set(df.columns)):
         return pd.DataFrame()
 
     df = df[needed].copy()
+    df = _dedupe_columns(df)  # ✅ critical
 
-    # FORCE numeric to avoid pandas resample agg TypeError on cloud
+    # Force numeric
     for c in needed:
+        # If somehow duplicates still slipped through, collapse to first column
+        if c in df.columns and isinstance(df[c], pd.DataFrame):
+            df[c] = df[c].iloc[:, 0]
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
     df = df.dropna(subset=["Open", "High", "Low", "Close"])
@@ -275,19 +251,20 @@ def get_hist(ticker: str, period: str = "3y") -> pd.DataFrame:
     return _flatten_yf_columns(raw, ticker)
 
 def resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    """
-    Cloud-safe OHLC resample that won’t crash on object dtypes or weird input.
-    """
     if df is None or df.empty:
         return pd.DataFrame()
 
     df = _ensure_datetime_index(df)
+    df = _dedupe_columns(df)  # ✅ prevents duplicate 'Open' etc.
+
     if df.empty:
         return pd.DataFrame()
 
-    # Enforce numeric again (belt + suspenders)
     for c in ["Open", "High", "Low", "Close", "Volume"]:
         if c in df.columns:
+            # If duplicate columns somehow exist, collapse
+            if isinstance(df[c], pd.DataFrame):
+                df[c] = df[c].iloc[:, 0]
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
     df = df.dropna(subset=["Open", "High", "Low", "Close"])
@@ -447,18 +424,12 @@ def best_trigger(bias: str, d: pd.DataFrame, w: pd.DataFrame) -> Tuple[Optional[
     if strat_inside(w) and len(w) >= 2:
         cur = w.iloc[-1]
         hi, lo = float(cur["High"]), float(cur["Low"])
-        if bias == "LONG":
-            return "W", hi, lo
-        if bias == "SHORT":
-            return "W", lo, hi
+        return ("W", hi, lo) if bias == "LONG" else ("W", lo, hi)
 
     if strat_inside(d) and len(d) >= 2:
         cur = d.iloc[-1]
         hi, lo = float(cur["High"]), float(cur["Low"])
-        if bias == "LONG":
-            return "D", hi, lo
-        if bias == "SHORT":
-            return "D", lo, hi
+        return ("D", hi, lo) if bias == "LONG" else ("D", lo, hi)
 
     return None, None, None
 
