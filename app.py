@@ -1,4 +1,4 @@
-# app.py — STRAT Regime Scanner V1 + Market Dashboard
+# app.py — STRAT Regime Scanner V1.1 + Market Dashboard Strength Meter
 import math
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
@@ -11,7 +11,7 @@ import yfinance as yf
 # =========================
 # STREAMLIT CONFIG
 # =========================
-st.set_page_config(page_title="STRAT Regime Scanner V1", layout="wide")
+st.set_page_config(page_title="STRAT Regime Scanner V1.1", layout="wide")
 
 # =========================
 # UNIVERSE
@@ -23,7 +23,7 @@ MARKET_ETFS = {
     "Dow Jones": "DIA",
 }
 
-# Metals (added)
+# Metals
 METALS_ETFS = {
     "Metals - Gold": "GLD",
     "Metals - Silver": "SLV",
@@ -44,7 +44,7 @@ SECTOR_ETFS = {
     "Financials": "XLF",
     "Technology": "XLK",
     "Health Care": "XLV",
-    **METALS_ETFS,  # ✅ metals show up in sector table + rotation
+    **METALS_ETFS,
 }
 
 # Stock lists per group for drilldown
@@ -173,7 +173,6 @@ def get_hist(ticker: str, period: str = "3y") -> pd.DataFrame:
         )
     except Exception:
         return pd.DataFrame()
-
     return _flatten_yf_columns(raw, ticker)
 
 def resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
@@ -211,17 +210,15 @@ def resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
         "Close": g["Close"].apply(safe_last),
         "Volume": g["Volume"].sum(),
     }).dropna(subset=["Open", "High", "Low", "Close"])
-
     return out
 
 # =========================
-# COMMON MATH HELPERS (for Market Dashboard)
+# COMMON DASHBOARD HELPERS (V1.1)
 # =========================
 def ema(series: pd.Series, n: int) -> pd.Series:
     return series.ewm(span=n, adjust=False).mean()
 
 def rsi_wilder(series: pd.Series, length: int = 14) -> pd.Series:
-    # Wilder-like RSI using EMA smoothing (close enough for dashboard purposes)
     delta = series.diff()
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
@@ -236,6 +233,34 @@ def total_return(series: pd.Series, lookback: int) -> pd.Series:
 
 def rs_vs_spy(series: pd.Series, spy_series: pd.Series, lookback: int) -> pd.Series:
     return total_return(series, lookback) - total_return(spy_series, lookback)
+
+def strength_meter(rs_short_v: float, rotation_v: float, trend: str) -> int:
+    """
+    Strength score 0–100 from:
+      - RS short vs SPY (outperformance now)
+      - Rotation (RS short - RS long) (improving/weakening)
+      - Trend (close>EMA and EMA rising)
+    Tuned so typical RS values (a few %) map to meaningful scores.
+    """
+    rs_score = np.clip(50 + (rs_short_v * 100.0) * 6.0, 0, 100)     # 1% RS ≈ +6
+    rot_score = np.clip(50 + (rotation_v * 100.0) * 8.0, 0, 100)    # 1% rotation ≈ +8
+    trend_bonus = 10 if trend == "UP" else -10
+    score = 0.50 * rs_score + 0.35 * rot_score + 0.15 * 50 + trend_bonus
+    return int(np.clip(score, 0, 100))
+
+def strength_label(score: int) -> str:
+    if score >= 70:
+        return "STRONG"
+    if score >= 45:
+        return "NEUTRAL"
+    return "WEAK"
+
+def meter_style(val: str) -> str:
+    if val == "STRONG":
+        return "background-color: #114b2b; color: white;"
+    if val == "NEUTRAL":
+        return "background-color: #5a4b11; color: white;"
+    return "background-color: #5a1111; color: white;"
 
 # =========================
 # STRAT HELPERS (your original)
@@ -485,7 +510,7 @@ def calc_scores(
 # PAGES
 # =========================
 def show_user_guide():
-    st.title("📘 STRAT Regime Scanner — User Guide (V1)")
+    st.title("📘 STRAT Regime Scanner — User Guide (V1.1)")
     st.markdown("""
 ## What this scanner does
 This scanner gives you:
@@ -520,27 +545,11 @@ This scanner gives you:
 - Stop = above Inside Bar HIGH
 
 Weekly triggers are better than daily when available.
-
----
-
-## Why some rows show blank Entry/Stop/RR
-Those columns fill only when a **Daily or Weekly Inside Bar** exists.
-No inside bar = **no trigger yet** (the scanner is telling you to wait).
-
----
-
-## Quick routine (2–5 min)
-1) Bias + strength  
-2) Rotation IN + Rotation OUT  
-3) Pick the strongest (or weakest) 1–3 groups  
-4) Drill down  
-5) Choose 1–3 names with valid triggers  
-6) Confirm chart sanity, then place trigger orders
 """)
 
 def show_market_dashboard():
-    st.title("📊 Market Dashboard (Sentiment • Rotation • Leaders)")
-    st.caption("Market → Sectors/Metals → Leaders. Relative Strength vs SPY + Trend/Momentum context.")
+    st.title("📊 Market Dashboard (Sentiment • Rotation • Leaders) — V1.1")
+    st.caption("Adds Strength Meter (0–100) for sectors AND leaders. Green = strong, red = weak.")
 
     with st.expander("Dashboard Settings", expanded=True):
         c1, c2, c3, c4 = st.columns([1.1, 1.1, 1.1, 1.1])
@@ -558,53 +567,58 @@ def show_market_dashboard():
     market_syms = list(MARKET_ETFS.values()) + ["^VIX"]
     mcols = st.columns(len(market_syms))
 
-    market_rows = []
     for i, sym in enumerate(market_syms):
         d = get_hist(sym)
         if d.empty:
+            with mcols[i]:
+                st.metric(sym, "n/a", "n/a")
             continue
-        close = d["Close"]
+
+        close = d["Close"].dropna()
+        if close.empty or len(close) < 10:
+            with mcols[i]:
+                st.metric(sym, "n/a", "n/a")
+            continue
+
         ema_t = ema(close, int(ema_trend_len))
         trend_up = bool(close.iloc[-1] > ema_t.iloc[-1] and ema_t.iloc[-1] > ema_t.iloc[-2])
         r = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
 
-        ret = None
-        if len(close) > rs_short:
-            ret = float(total_return(close, int(rs_short)).iloc[-1])
-
-        market_rows.append({
-            "Symbol": sym,
-            "Last": float(close.iloc[-1]),
-            "Trend": "UP" if trend_up else "DOWN/CHOP",
-            "RSI": r,
-            f"Ret({rs_short})": ret
-        })
+        ret = float(total_return(close, int(rs_short)).iloc[-1]) if len(close) > rs_short else np.nan
 
         with mcols[i]:
-            st.metric(sym, f"{close.iloc[-1]:.2f}", f"{(ret*100):.1f}%" if ret is not None else "n/a")
+            st.metric(sym, f"{close.iloc[-1]:.2f}", f"{(ret*100):.1f}%" if np.isfinite(ret) else "n/a")
             st.write(f"Trend: **{'UP' if trend_up else 'DOWN/CHOP'}**")
             st.write(f"RSI: **{r:.1f}**")
 
     # Regime read (SPY)
     spy_df = get_hist("SPY")
     if not spy_df.empty:
-        spy = spy_df["Close"]
-        spy_ema = ema(spy, int(ema_trend_len))
-        risk_on = bool(spy.iloc[-1] > spy_ema.iloc[-1] and spy_ema.iloc[-1] > spy_ema.iloc[-2])
-        st.info(f"SPY Regime vs {ema_trend_len} EMA: **{'RISK-ON (long-biased)' if risk_on else 'RISK-OFF / DEFENSIVE'}**")
+        spy = spy_df["Close"].dropna()
+        if len(spy) > 10:
+            spy_ema = ema(spy, int(ema_trend_len))
+            risk_on = bool(spy.iloc[-1] > spy_ema.iloc[-1] and spy_ema.iloc[-1] > spy_ema.iloc[-2])
+            st.info(f"SPY Regime vs {ema_trend_len} EMA: **{'RISK-ON (long-biased)' if risk_on else 'RISK-OFF / DEFENSIVE'}**")
 
-    # --- Sector/Metals rotation table ---
-    st.subheader("Sector / Metals Rotation (Relative Strength vs SPY)")
-    spy = spy_df["Close"] if not spy_df.empty else None
+    # --- Sector/Metals rotation + strength ---
+    st.subheader("Sector / Metals Rotation + Strength (Relative Strength vs SPY)")
+    if spy_df.empty:
+        st.warning("SPY data unavailable; cannot compute RS vs SPY.")
+        return
+
+    spy = spy_df["Close"].dropna()
+    if len(spy) < (rs_long + 10):
+        st.warning("Not enough SPY history for these lookbacks.")
+        return
+
     sector_rows = []
-
     for name, etf in SECTOR_ETFS.items():
         d = get_hist(etf)
-        if d.empty or spy is None or spy.empty:
+        if d.empty:
             continue
-        close = d["Close"].dropna()
 
-        if len(close) < max(rs_long + 5, 120) or len(spy) < max(rs_long + 5, 120):
+        close = d["Close"].dropna()
+        if len(close) < (rs_long + 10):
             continue
 
         rs_s = float(rs_vs_spy(close, spy, int(rs_short)).iloc[-1])
@@ -615,9 +629,12 @@ def show_market_dashboard():
         trend = "UP" if (close.iloc[-1] > ema_t.iloc[-1] and ema_t.iloc[-1] > ema_t.iloc[-2]) else "DOWN/CHOP"
         r = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
 
+        score = strength_meter(rs_s, rotation, trend)
         sector_rows.append({
             "Group": name,
             "ETF": etf,
+            "Strength": score,
+            "Meter": strength_label(score),
             f"RS vs SPY ({rs_short})": rs_s,
             f"RS vs SPY ({rs_long})": rs_l,
             "Rotation (RS short - RS long)": rotation,
@@ -630,47 +647,59 @@ def show_market_dashboard():
         st.warning("Sector data unavailable right now (yfinance returned empty). Try Refresh.")
         return
 
-    sectors = sectors.sort_values("Rotation (RS short - RS long)", ascending=False)
+    sectors = sectors.sort_values(["Strength", "Rotation (RS short - RS long)"], ascending=[False, False])
 
-    st.dataframe(
-        sectors.style.format({
+    styled = (
+        sectors
+        .style
+        .format({
             f"RS vs SPY ({rs_short})": "{:.2%}",
             f"RS vs SPY ({rs_long})": "{:.2%}",
             "Rotation (RS short - RS long)": "{:.2%}",
             "RSI": "{:.1f}"
-        }),
-        use_container_width=True,
-        hide_index=True,
-        height=420
+        })
+        .applymap(meter_style, subset=["Meter"])
+        .background_gradient(subset=["Strength"], cmap="RdYlGn")
     )
 
-    # Rotation IN/OUT callouts
-    top_in = sectors.head(3)[["Group", "ETF"]].apply(lambda r: f"{r['Group']}({r['ETF']})", axis=1).tolist()
-    top_out = sectors.tail(3)[["Group", "ETF"]].apply(lambda r: f"{r['Group']}({r['ETF']})", axis=1).tolist()
-    st.write("### Rotation IN")
+    st.dataframe(styled, use_container_width=True, hide_index=True, height=420)
+
+    # Rotation IN/OUT callouts (still useful as quick read)
+    top_in = sectors.head(3)[["Group", "ETF", "Meter", "Strength"]].apply(
+        lambda r: f"{r['Group']}({r['ETF']}) {r['Meter']} {int(r['Strength'])}",
+        axis=1
+    ).tolist()
+    top_out = sectors.tail(3)[["Group", "ETF", "Meter", "Strength"]].apply(
+        lambda r: f"{r['Group']}({r['ETF']}) {r['Meter']} {int(r['Strength'])}",
+        axis=1
+    ).tolist()
+
+    st.write("### Rotation / Strength IN (Top 3)")
     st.write(", ".join(top_in))
-    st.write("### Rotation OUT")
+    st.write("### Rotation / Strength OUT (Bottom 3)")
     st.write(", ".join(top_out))
 
-    # --- Leaders drilldown ---
-    st.subheader("Best Names Inside a Group (Leaders + RS + Momentum)")
+    # --- Leaders drilldown with strength ---
+    st.subheader("Leaders Inside a Group (with Strength Meter)")
+
     group_choice = st.selectbox("Choose a group to drill into:", options=list(SECTOR_TICKERS.keys()), index=0)
     leaders = SECTOR_TICKERS.get(group_choice, [])
-    max_scan = min(30, len(leaders))
-    scan_n = st.slider("How many names to check", 1, max_scan if max_scan > 0 else 1, value=min(15, max_scan) if max_scan > 0 else 1)
-    scan_list = leaders[:scan_n]
-
-    if spy is None or spy.empty:
-        st.warning("SPY not available; cannot compute relative strength.")
+    if not leaders:
+        st.info("No leaders configured for this group.")
         return
+
+    max_scan = min(30, len(leaders))
+    scan_n = st.slider("How many names to check", 1, max_scan, value=min(15, max_scan))
+    scan_list = leaders[:scan_n]
 
     leader_rows = []
     for sym in scan_list:
         d = get_hist(sym)
         if d.empty:
             continue
+
         close = d["Close"].dropna()
-        if len(close) < max(rs_long + 5, 120):
+        if len(close) < (rs_long + 10):
             continue
 
         rs_s = float(rs_vs_spy(close, spy, int(rs_short)).iloc[-1])
@@ -682,8 +711,12 @@ def show_market_dashboard():
         trend = "UP" if (close.iloc[-1] > ema_t.iloc[-1] and ema_t.iloc[-1] > ema_t.iloc[-2]) else "DOWN/CHOP"
         r = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
 
+        score = strength_meter(rs_s, rotation, trend)
+
         leader_rows.append({
             "Ticker": sym,
+            "Strength": score,
+            "Meter": strength_label(score),
             "Trend": trend,
             "RSI": r,
             f"Mom({rs_short})": mom,
@@ -697,27 +730,27 @@ def show_market_dashboard():
         st.info("No leaders returned for this group under current lookbacks.")
         return
 
-    leaders_df = leaders_df.sort_values(["Rotation", f"RS vs SPY ({rs_short})"], ascending=[False, False])
+    leaders_df = leaders_df.sort_values(["Strength", "Rotation", f"RS vs SPY ({rs_short})"], ascending=[False, False, False])
 
-    st.dataframe(
-        leaders_df.style.format({
+    styled_leaders = (
+        leaders_df
+        .style
+        .format({
             "RSI": "{:.1f}",
             f"Mom({rs_short})": "{:.2%}",
             f"RS vs SPY ({rs_short})": "{:.2%}",
             f"RS vs SPY ({rs_long})": "{:.2%}",
             "Rotation": "{:.2%}"
-        }),
-        use_container_width=True,
-        hide_index=True,
-        height=420
+        })
+        .applymap(meter_style, subset=["Meter"])
+        .background_gradient(subset=["Strength"], cmap="RdYlGn")
     )
 
+    st.dataframe(styled_leaders, use_container_width=True, hide_index=True, height=420)
+
 def show_scanner():
-    # =========================
-    # UI CONTROLS (your original)
-    # =========================
-    st.title("STRAT Regime Scanner (Auto LONG/SHORT + Magnitude) — V1")
-    st.caption("Bias from market regime. Ranks tickers by setup quality AND magnitude (RR + ATR% + compression).")
+    st.title("STRAT Regime Scanner (Auto LONG/SHORT + Magnitude) — V1.1")
+    st.caption("Scanner unchanged. Dashboard upgraded with Strength Meter.")
 
     with st.expander("Filters", expanded=True):
         colA, colB, colC, colD = st.columns([1.1, 1.2, 1.6, 1.1])
@@ -937,11 +970,11 @@ def show_scanner():
     )
 
     if rotation_in:
-        st.write("### Rotation IN")
+        st.write("### Rotation IN (Scanner ranking)")
         st.write(", ".join(rotation_in))
 
     if rotation_out:
-        st.write("### Rotation OUT")
+        st.write("### Rotation OUT (Scanner ranking)")
         st.write(", ".join(rotation_out))
 
     st.success(plan)
@@ -954,7 +987,6 @@ def show_scanner():
 # SIDEBAR NAV (with toggle)
 # =========================
 st.sidebar.title("Navigation")
-
 show_market_dash = st.sidebar.toggle("Enable Market Dashboard", value=True)
 
 pages = ["Scanner", "📘 User Guide"]
