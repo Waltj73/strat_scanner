@@ -12,7 +12,7 @@ from strat_scanner.indicators import (
     strength_meter,
     strength_label,
 )
-from strat_scanner.strat import best_trigger
+from strat_scanner.strat import strat_signal
 
 
 def analyze_ticker(
@@ -22,12 +22,12 @@ def analyze_ticker(
     rs_long: int,
     ema_trend_len: int,
     rsi_len: int,
-    direction: Optional[str] = None,
 ) -> Optional[Dict]:
     df = get_hist(ticker)
     if df is None or df.empty:
         return None
 
+    # Ensure required columns exist
     if "Close" not in df.columns:
         return None
 
@@ -35,9 +35,11 @@ def analyze_ticker(
     if close.empty:
         return None
 
+    # Need enough history for RS lookbacks
     if len(close) < (rs_long + 10) or len(spy_close) < (rs_long + 10):
         return None
 
+    # Core metrics
     rs_s = float(rs_vs_spy(close, spy_close, int(rs_short)).iloc[-1])
     rs_l = float(rs_vs_spy(close, spy_close, int(rs_long)).iloc[-1])
     rot = rs_s - rs_l
@@ -48,11 +50,15 @@ def analyze_ticker(
     strength = int(strength_meter(rs_s, rot, tr))
     meter = strength_label(strength)
 
-    # IMPORTANT: best_trigger expects a DataFrame (OHLC)
-    trigger = best_trigger(df, direction=direction)
+    # Direction bias for STRAT messaging
+    direction = "LONG" if tr == "UP" else "SHORT"
 
+    # STRAT info (uses OHLC)
+    s = strat_signal(df, direction=direction)
+
+    # Simple entry/stop scaffolding
     entry = float(close.iloc[-1])
-    stop = float(close.rolling(20).min().iloc[-1]) if len(close) >= 20 else float(close.min())
+    stop = float(df["Low"].rolling(20).min().iloc[-1]) if "Low" in df.columns and len(df) >= 20 else float(close.min())
 
     return {
         "Ticker": ticker.upper(),
@@ -63,7 +69,12 @@ def analyze_ticker(
         "RS_short": rs_s,
         "RS_long": rs_l,
         "Rotation": rot,
-        "TriggerStatus": trigger,
+
+        # STRAT fields (this is what you’re missing)
+        "StratBar": s.bar,
+        "TriggerStatus": f"{s.trigger} | Bar: {s.bar}",
+
+        # Existing fields expected by pages
         "TF": "D",
         "Entry": entry,
         "Stop": stop,
@@ -80,11 +91,13 @@ def writeup_block(info: Dict, pb_low: float, pb_high: float):
     c3.metric("RS short", f"{info['RS_short']:.2%}")
     c4.metric("Rotation", f"{info['Rotation']:.2%}")
 
-    st.write(f"Trigger: **{info['TriggerStatus']}**  | TF: **{info['TF']}**")
+    # STRAT line
+    st.write(f"STRAT: **{info.get('TriggerStatus','n/a')}**")
+
     st.write(f"Entry (guide): **{info['Entry']:.2f}**")
     st.write(f"Stop (guide): **{info['Stop']:.2f}**")
 
     if info["Trend"] == "UP" and (pb_low <= info["RSI"] <= pb_high):
-        st.success(f"Pullback zone OK (RSI {pb_low}–{pb_high})")
+        st.success(f"Pullback zone OK (RSI between {pb_low}–{pb_high})")
     else:
         st.info("Pullback zone not confirmed (or trend not UP).")
