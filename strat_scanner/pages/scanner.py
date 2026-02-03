@@ -1,8 +1,3 @@
-# strat_scanner/pages/scanner.py
-# STRAT Scanner page (sector ranking + drilldown into leaders)
-
-from __future__ import annotations
-
 from datetime import datetime, timezone
 from typing import Dict, List
 
@@ -10,27 +5,19 @@ import pandas as pd
 import streamlit as st
 
 from strat_scanner.data import get_hist
-from strat_scanner.indicators import (
-    rs_vs_spy,
-    rsi_wilder,
-    trend_label,
-    strength_meter,
-    strength_label,
+from strat_scanner.strat import (
+    tf_frames, compute_flags, score_regime, market_bias_and_strength,
+    alignment_ok, best_trigger
 )
+from strat_scanner.engine import magnitude_metrics, calc_scores
 
-from strat_scanner.engine import analyze_ticker
+MARKET_ETFS = {
+    "S&P 500": "SPY",
+    "Nasdaq 100": "QQQ",
+    "Russell 2000": "IWM",
+    "Dow Jones": "DIA",
+}
 
-# writeup_block is optional (dashboard uses it). If your engine.py doesn't have it,
-# this file will still run without breaking.
-try:
-    from strat_scanner.engine import writeup_block  # type: ignore
-except Exception:
-    writeup_block = None  # type: ignore
-
-
-# -------------------------
-# Sector ETFs (Rotation IN/OUT)
-# -------------------------
 SECTOR_ETFS = {
     "Energy": "XLE",
     "Comm Services": "XLC",
@@ -50,22 +37,18 @@ SECTOR_ETFS = {
     "Metals - Palladium": "PALL",
 }
 
-# -------------------------
-# Drilldown universe per group
-# (You can expand these later; keep it stable for now)
-# -------------------------
-SECTOR_TICKERS: Dict[str, List[str]] = {
-    "Energy": ["XOM","CVX","COP","EOG","SLB","HAL","PSX","MPC","VLO","OXY","KMI","WMB"],
-    "Comm Services": ["GOOGL","META","NFLX","TMUS","VZ","T","DIS","CMCSA"],
-    "Staples": ["PG","KO","PEP","WMT","COST","PM","MDLZ","CL"],
-    "Materials": ["LIN","APD","SHW","NUE","DOW","ECL","FCX","NEM"],
-    "Industrials": ["CAT","DE","HON","GE","LMT","RTX","BA","UNP","UPS","FDX"],
-    "Real Estate": ["PLD","AMT","EQIX","PSA","O","WELL","DLR","SPG"],
-    "Discretionary": ["AMZN","TSLA","HD","MCD","NKE","SBUX","LOW","BKNG"],
-    "Utilities": ["NEE","DUK","SO","AEP","EXC","XEL","SRE","ED"],
-    "Financials": ["BRK-B","JPM","BAC","WFC","GS","MS","C","BLK","SCHW"],
-    "Technology": ["AAPL","MSFT","NVDA","AVGO","CRM","ORCL","ADBE","AMD","CSCO","QCOM"],
-    "Health Care": ["UNH","JNJ","LLY","PFE","MRK","ABBV","TMO","ABT","DHR"],
+SECTOR_TICKERS = {
+    "Energy": ["XOM","CVX","COP","EOG","SLB","HAL","PSX","MPC","VLO","OXY","KMI","WMB","BKR","DVN","PXD"],
+    "Comm Services": ["GOOGL","GOOG","META","NFLX","TMUS","VZ","T","DIS","CMCSA","CHTR","EA","TTWO","SPOT","ROKU","SNAP"],
+    "Staples": ["PG","KO","PEP","WMT","COST","PM","MO","MDLZ","CL","KMB","GIS","KHC","SYY","HSY","EL"],
+    "Materials": ["LIN","APD","SHW","NUE","DOW","PPG","ECL","FCX","NEM","IFF","MLM","VMC","ALB","MOS","DD"],
+    "Industrials": ["CAT","DE","HON","GE","LMT","RTX","BA","UNP","UPS","FDX","ETN","EMR","CSX","NSC","WM"],
+    "Real Estate": ["PLD","AMT","EQIX","PSA","O","WELL","DLR","SPG","CCI","VICI","AVB","EQR","IRM","SBAC","EXR"],
+    "Discretionary": ["AMZN","TSLA","HD","MCD","NKE","SBUX","LOW","BKNG","TJX","GM","F","MAR","ROST","ORLY","CMG"],
+    "Utilities": ["NEE","DUK","SO","D","AEP","EXC","XEL","SRE","ED","PEG","EIX","PCG","WEC","ES","AWK"],
+    "Financials": ["BRK-B","JPM","BAC","WFC","GS","MS","C","BLK","SCHW","AXP","SPGI","ICE","CME","PNC","TFC"],
+    "Technology": ["AAPL","MSFT","NVDA","AVGO","CRM","ORCL","ADBE","AMD","CSCO","INTC","QCOM","TXN","NOW","AMAT","MU"],
+    "Health Care": ["UNH","JNJ","LLY","PFE","MRK","ABBV","TMO","ABT","DHR","BMY","AMGN","GILD","ISRG","VRTX","MDT"],
     "Metals - Gold": ["GLD"],
     "Metals - Silver": ["SLV"],
     "Metals - Copper": ["CPER"],
@@ -73,174 +56,137 @@ SECTOR_TICKERS: Dict[str, List[str]] = {
     "Metals - Palladium": ["PALL"],
 }
 
-
 def show_scanner():
-    st.title("📌 STRAT Scanner (Rotation • Leaders • Drilldown)")
+    st.title("📡 STRAT Regime Scanner")
+    st.caption("Market bias → sector ranking → drilldown candidates → magnitude (RR/ATR/compression).")
 
-    # -------------------------
-    # Settings
-    # -------------------------
-    with st.expander("Scanner Settings", expanded=True):
-        c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1.2])
-        with c1:
-            rs_short = st.selectbox("RS Lookback (short)", [21, 30, 42], index=0)
-        with c2:
-            rs_long = st.selectbox("RS Lookback (long)", [63, 90, 126], index=0)
-        with c3:
-            ema_len = st.selectbox("Trend EMA", [50, 100, 200], index=0)
-        with c4:
-            rsi_len = st.selectbox("RSI Length", [7, 14, 21], index=1)
-        with c5:
-            if st.button("Refresh data"):
-                st.cache_data.clear()
-                st.rerun()
+    with st.expander("Filters", expanded=True):
+        a, b, c, d = st.columns([1.2, 1.2, 1.6, 1.0])
+        with a:
+            only_inside = st.checkbox("ONLY Inside Bars (D or W)", value=False)
+        with b:
+            only_212 = st.checkbox("ONLY 2-1-2 (bias direction)", value=False)
+        with c:
+            require_align = st.checkbox("Require Monthly or Weekly alignment", value=True)
+        with d:
+            top_k = st.slider("Top Picks", 3, 10, 5)
+
+        if st.button("Refresh data"):
+            st.cache_data.clear()
+            st.rerun()
 
     st.caption(f"Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
 
-    # -------------------------
-    # SPY anchor
-    # -------------------------
-    spy_df = get_hist("SPY")
-    if spy_df is None or spy_df.empty:
-        st.error("SPY data unavailable.")
+    # market regime
+    market_rows: List[Dict] = []
+    for name, etf in MARKET_ETFS.items():
+        ddf = get_hist(etf)
+        if ddf.empty:
+            continue
+        d_tf, w_tf, m_tf = tf_frames(ddf)
+        flags = compute_flags(d_tf, w_tf, m_tf)
+        bull, bear = score_regime(flags)
+        row = {"Market": name, "ETF": etf, "BullScore": bull, "BearScore": bear}
+        row.update(flags)
+        market_rows.append(row)
+
+    if not market_rows:
+        st.error("No market data returned. yfinance may be throttling. Hit Refresh or wait a minute.")
         return
 
-    spy = spy_df["Close"].dropna()
-    if len(spy) < (int(rs_long) + 10):
-        st.error("Not enough SPY history for these lookbacks.")
+    bias, strength, diff = market_bias_and_strength(market_rows)
+
+    st.subheader("Market Regime")
+    st.dataframe(pd.DataFrame(market_rows)[["Market","ETF","BullScore","BearScore","M_Bull","W_Bull","D_Bull","M_Bear","W_Bear","D_Bear"]], use_container_width=True, hide_index=True)
+
+    st.info(f"Bias: **{bias}** | Strength: **{strength}/100** | Bull–Bear diff: **{diff}**")
+
+    # sector regime scoring (not RS rotation here — that’s dashboard)
+    sector_rows: List[Dict] = []
+    for sector, etf in SECTOR_ETFS.items():
+        ddf = get_hist(etf)
+        if ddf.empty:
+            continue
+        d_tf, w_tf, m_tf = tf_frames(ddf)
+        flags = compute_flags(d_tf, w_tf, m_tf)
+        bull, bear = score_regime(flags)
+        row = {"Sector": sector, "ETF": etf, "BullScore": bull, "BearScore": bear}
+        row.update(flags)
+        sector_rows.append(row)
+
+    sectors_df = pd.DataFrame(sector_rows)
+    if sectors_df.empty:
+        st.error("No sector ETF data returned.")
         return
 
-    # -------------------------
-    # Build sector rotation table
-    # -------------------------
-    rows = []
-    for group, etf in SECTOR_ETFS.items():
-        df = get_hist(etf)
-        if df is None or df.empty:
+    if bias == "LONG":
+        sectors_df = sectors_df.sort_values(["BullScore","BearScore"], ascending=[False, True])
+    elif bias == "SHORT":
+        sectors_df = sectors_df.sort_values(["BearScore","BullScore"], ascending=[False, True])
+    else:
+        sectors_df["Dominance"] = (sectors_df["BullScore"] - sectors_df["BearScore"]).abs()
+        sectors_df = sectors_df.sort_values("Dominance", ascending=False)
+
+    st.subheader("Sectors / Metals ranked after bias is known")
+    st.dataframe(sectors_df[["Sector","ETF","BullScore","BearScore","M_Bull","W_Bull","D_Bull","M_Bear","W_Bear","D_Bear","W_Inside","D_Inside","W_212Up","D_212Up","W_212Dn","D_212Dn"]],
+                 use_container_width=True, hide_index=True)
+
+    st.subheader("Drilldown")
+    sector_choice = st.selectbox("Choose group:", list(SECTOR_TICKERS.keys()), index=0)
+    tickers = SECTOR_TICKERS.get(sector_choice, [])
+    scan_n = st.slider("How many tickers to scan", 1, max(1, len(tickers)), min(15, len(tickers)))
+    scan_list = tickers[:scan_n]
+
+    cand_rows: List[Dict] = []
+    for t in scan_list:
+        ddf = get_hist(t)
+        if ddf.empty:
             continue
 
-        close = df["Close"].dropna()
-        if len(close) < (int(rs_long) + 10):
+        d_tf, w_tf, m_tf = tf_frames(ddf)
+        flags = compute_flags(d_tf, w_tf, m_tf)
+
+        eff_bias = bias if bias in ("LONG","SHORT") else "LONG"
+
+        if require_align and eff_bias in ("LONG","SHORT") and not alignment_ok(eff_bias, flags):
             continue
 
-        rs_s = float(rs_vs_spy(close, spy, int(rs_short)).iloc[-1])
-        rs_l = float(rs_vs_spy(close, spy, int(rs_long)).iloc[-1])
-        rot = rs_s - rs_l
+        if only_inside and not (flags["D_Inside"] or flags["W_Inside"]):
+            continue
 
-        tr = trend_label(close, int(ema_len))
-        rsi_val = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
+        if only_212:
+            if eff_bias == "LONG" and not (flags["D_212Up"] or flags["W_212Up"]):
+                continue
+            if eff_bias == "SHORT" and not (flags["D_212Dn"] or flags["W_212Dn"]):
+                continue
 
-        score = int(strength_meter(rs_s, rot, tr))
+        tf, entry, stop = best_trigger(eff_bias, d_tf, w_tf)
+        rr, atrp, room, compression = magnitude_metrics(eff_bias, d_tf, entry, stop)
+        setup_score, mag_score, total_score = calc_scores(eff_bias, flags, rr, atrp, compression, entry, stop)
 
-        rows.append({
-            "Group": group,
-            "ETF": etf,
-            "Strength": score,
-            "Meter": strength_label(score),
-            f"RS vs SPY ({rs_short})": rs_s,
-            f"RS vs SPY ({rs_long})": rs_l,
-            "Rotation (short-long)": rot,
-            "Trend": tr,
-            "RSI": rsi_val,
+        trigger_status = "READY" if (flags["W_Inside"] or flags["D_Inside"]) else "WAIT"
+
+        cand_rows.append({
+            "Ticker": t,
+            "Trigger": trigger_status,
+            "Total": total_score,
+            "Setup": setup_score,
+            "Mag": mag_score,
+            "TF": tf,
+            "Entry": None if entry is None else round(float(entry), 2),
+            "Stop": None if stop is None else round(float(stop), 2),
+            "RR": None if rr is None else round(float(rr), 2),
+            "ATR%": None if atrp is None else round(float(atrp), 2),
         })
 
-    sector_df = pd.DataFrame(rows)
-    if sector_df.empty:
-        st.warning("No sector rows returned. Try Refresh.")
+    if not cand_rows:
+        st.warning("No matches under current filters. Loosen filters or try another group.")
         return
 
-    sector_df = sector_df.sort_values(["Strength", "Rotation (short-long)"], ascending=[False, False])
+    df = pd.DataFrame(cand_rows).sort_values("Total", ascending=False)
 
-    st.subheader("Sector / Metals Rotation + Strength (vs SPY)")
-    st.dataframe(
-        sector_df.style.format({
-            f"RS vs SPY ({rs_short})": "{:.2%}",
-            f"RS vs SPY ({rs_long})": "{:.2%}",
-            "Rotation (short-long)": "{:.2%}",
-            "RSI": "{:.1f}",
-        }),
-        use_container_width=True,
-        hide_index=True,
-        height=520,
-    )
+    st.subheader(f"Top Ideas — Bias: {bias}")
+    st.dataframe(df.head(top_k), use_container_width=True, hide_index=True)
 
-    # -------------------------
-    # Drilldown controls
-    # -------------------------
-    st.subheader("🔍 Drilldown: Leaders inside a selected group")
-
-    left, right = st.columns([1.2, 1])
-    with left:
-        default_group = sector_df.iloc[0]["Group"]
-        group_pick = st.selectbox("Pick a group to drill into:", sector_df["Group"].tolist(), index=0)
-    with right:
-        leaders_n = st.slider("How many tickers to show", 5, 25, 12)
-
-    tickers = SECTOR_TICKERS.get(group_pick, [])
-    if not tickers:
-        st.info("No tickers configured for this group yet.")
-        return
-
-    # -------------------------
-    # Analyze tickers
-    # -------------------------
-    results = []
-    for sym in tickers:
-        info = analyze_ticker(sym, spy, int(rs_short), int(rs_long), int(ema_len), int(rsi_len))
-        if info is None:
-            continue
-        info["Group"] = group_pick
-        results.append(info)
-
-    if not results:
-        st.warning("No ticker results returned (data provider may be empty).")
-        return
-
-    # sort by strength, rotation, rs_short (descending)
-    results = sorted(results, key=lambda x: (x.get("Strength", 0), x.get("Rotation", 0), x.get("RS_short", 0)), reverse=True)
-    results = results[: int(leaders_n)]
-
-    out = pd.DataFrame([{
-        "Group": r.get("Group"),
-        "Ticker": r.get("Ticker"),
-        "Strength": r.get("Strength"),
-        "Meter": r.get("Meter"),
-        "Trend": r.get("Trend"),
-        "RSI": r.get("RSI"),
-        f"RS vs SPY ({rs_short})": r.get("RS_short"),
-        f"RS vs SPY ({rs_long})": r.get("RS_long"),
-        "Rotation": r.get("Rotation"),
-        "Trigger": r.get("TriggerStatus"),
-        "TF": r.get("TF"),
-        "Entry": r.get("Entry"),
-        "Stop": r.get("Stop"),
-    } for r in results])
-
-    st.write(f"**Group:** {group_pick}  •  **Top {len(out)} tickers**")
-    st.dataframe(
-        out.style.format({
-            f"RS vs SPY ({rs_short})": "{:.2%}",
-            f"RS vs SPY ({rs_long})": "{:.2%}",
-            "Rotation": "{:.2%}",
-            "RSI": "{:.1f}",
-            "Entry": "{:.2f}",
-            "Stop": "{:.2f}",
-        }),
-        use_container_width=True,
-        hide_index=True,
-        height=460
-    )
-
-    # -------------------------
-    # Optional Write-ups
-    # -------------------------
-    st.write("### 🧾 Ticker Write-ups (click to expand)")
-    for r in results:
-        label = f"{r.get('Group')} — {r.get('Ticker')} | {r.get('Meter')} {r.get('Strength')}/100 | {r.get('TriggerStatus')}"
-        with st.expander(label):
-            if writeup_block is None:
-                # fallback if you don't have writeup_block in engine.py
-                st.write(r)
-            else:
-                # simple defaults; dashboard has sliders for these
-                writeup_block(r, pb_low=40, pb_high=55)
+    st.subheader("All Matches")
+    st.dataframe(df, use_container_width=True, hide_index=True)
