@@ -33,9 +33,15 @@ def analyze_ticker(
     if "Close" not in df.columns:
         return None
 
-    close = df["Close"].dropna()
-    tr = trend_label(close, int(ema_trend_len))
-    if len(close) < (rs_long + 10) or len(spy_close) < (rs_long + 10):
+   close = df["Close"].dropna()
+
+rs_s = float(rs_vs_spy(close, spy_close, int(rs_short)).iloc[-1])
+rs_l = float(rs_vs_spy(close, spy_close, int(rs_long)).iloc[-1])
+rot = rs_s - rs_l
+
+tr = trend_label(close, int(ema_trend_len))   # ← THIS WAS MISSING
+rsi = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
+
         return None
 
     # --- Rotation / strength ---
