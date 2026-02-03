@@ -243,21 +243,4 @@ def show_dashboard():
     )
     st.dataframe(wstyled, use_container_width=True, hide_index=True, height=420)
 
-st.write("### 📌 Watchlist Write-ups (click to expand)")
-
-for rec in wdf.head(20).to_dict("records"):
-    sym = str(rec.get("Ticker", "")).strip().upper()
-    if not sym:
-        continue
-
-    full = analyze_ticker(sym, spy, int(rs_short), int(rs_long),
-                           int(ema_trend_len), int(rsi_len))
-    if full is None:
-        continue
-
-    full["Group"] = rec.get("Group", "—")
-
-    title = f"{full['Group']} — {full['Ticker']} | {full['Meter']} {full['Strength']}/100 | {full['TriggerStatus']}"
-    with st.expander(title):
-        writeup_block(full, pb_low, pb_high)
 
