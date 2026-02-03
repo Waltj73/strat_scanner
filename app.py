@@ -698,8 +698,8 @@ def show_user_guide():
 
 The STRAT Regime Scanner is designed to turn the market into a simple decision pipeline.
 
-Most traders get stuck because they do the process backwards:
-they pick a ticker first, then try to justify it after.
+Most traders do the process backwards:
+they pick a ticker first, then try to justify it.
 
 This tool forces the correct order:
 
@@ -727,6 +727,201 @@ The Dashboard is an **attention filter**.
 It tells you where to focus.
 
 ---
+
+### 2) Today Watchlist
+The Watchlist is your daily short list.
+
+It works like this:
+1) Select the **top sectors rotating IN**
+2) For each sector, it picks **the strongest leaders**
+3) Optionally filters by **pullback quality**
+4) Shows **trigger status** (READY vs WAIT)
+5) Provides a complete **trade-plan write-up**
+
+This is your “do not overthink it” list.
+
+---
+
+### 3) STRAT Scanner
+The Scanner answers: **“What is actionable right now?”**
+
+This is your execution engine:
+- It builds overall market bias (LONG / SHORT / MIXED)
+- It ranks sectors based on that bias
+- It drills into a sector and ranks names by setup + magnitude
+- It prints Entry/Stop/RR when an Inside Bar is present
+
+If Entry/Stop are blank, that is not a bug.
+That means: **no trigger yet → wait.**
+
+---
+
+### 4) Ticker Analyzer
+The Analyzer answers: **“Why does this score the way it does?”**
+
+Type any ticker and it will show:
+- Trend condition
+- RSI state
+- Relative strength vs SPY
+- Rotation improvement/deterioration
+- STRAT context + triggers
+- Trade-plan notes
+
+This is where you sanity-check a candidate.
+
+---
+
+## Strength Meter (0–100)
+
+Strength is a blended score that weights:
+- Relative strength vs SPY (short lookback)
+- Rotation (short RS minus long RS)
+- Trend (price vs EMA + EMA slope)
+
+Why cap values?
+Because extreme moves distort scoring.
+Capping keeps it stable and tradable.
+
+Interpretation:
+- **70–100** = Strong leadership (best follow-through)
+- **45–69** = Neutral (mixed conditions)
+- **0–44** = Weak (avoid for longs)
+
+---
+
+## Rotation (What “Rotation IN/OUT” Means)
+
+Rotation measures whether leadership is **improving right now**.
+
+We compute:
+**Rotation = RS(short) − RS(long)**
+
+- Positive rotation → money flowing into the name/sector
+- Negative rotation → money flowing out
+
+This is different than “already strong.”
+Rotation tells you who is *becoming* strong.
+
+---
+
+## RSI Pullback Zone (Continuation Entries)
+
+Most quality swing entries happen on pullbacks inside a trend.
+
+This tool uses a pullback zone for uptrends:
+**RSI between 40 and 55** (default)
+
+Meaning:
+- Trend still intact
+- Momentum cooled
+- Continuation becomes likely
+
+If RSI is above the zone, it may be extended.
+If RSI is below, it may be breaking.
+
+---
+
+## STRAT Trigger Logic (How Entries Work)
+
+When an Inside Bar exists, the tool prints actionable levels.
+
+**LONG**
+- Entry = break of Inside Bar high
+- Stop = below Inside Bar low
+
+**SHORT**
+- Entry = break of Inside Bar low
+- Stop = above Inside Bar high
+
+Weekly triggers matter more than daily.
+Daily triggers are fine if the name is already a leader.
+
+---
+
+## Trade Plan Notes (Your “Why/How” Explanation)
+
+Each write-up includes:
+
+- **Grade (A/B/C)** based on:
+  - Strength
+  - Trend
+  - Rotation
+  - Pullback quality
+  - Trigger presence
+
+- **Play**:
+  - Breakout play (if trigger is READY)
+  - Pullback play (if in zone but trigger not printed yet)
+  - Wait / Avoid (if conditions aren’t aligned)
+
+- **Targets**
+  - T1 = 20-day extreme
+  - T2 = 63-day extreme
+
+- **Invalidation**
+  - Stop is the invalidation level
+
+- **Sizing hint**
+  - Uses ATR% to hint whether you should size down/up
+
+---
+
+## Recommended Daily Workflow (2–5 minutes)
+
+1) Go to **Market Dashboard**
+   - Note market trend + VIX behavior
+   - Identify the top sectors rotating IN
+
+2) Go to **Today Watchlist**
+   - Review only the strongest leaders
+   - Expand write-ups for A/B candidates
+   - Mark names that are READY or close to READY
+
+3) Go to **Scanner** (execution)
+   - Drill into your chosen sector
+   - Only act on names with real triggers
+   - Place stop orders and walk away
+
+Goal:
+**Let the trigger take you in.**
+No trigger = no trade.
+
+---
+
+## When Dashboard and Scanner Disagree
+
+This happens when:
+- A sector is improving (dashboard)
+- But triggers aren’t printed yet (scanner)
+
+That’s normal.
+
+Dashboard controls **focus**.  
+Scanner controls **entries**.
+
+---
+
+## Best Default Settings
+
+Typical swing settings:
+- RS short: 21
+- RS long: 63
+- Trend EMA: 50
+- RSI: 14
+- Pullback zone: 40–55
+
+Balanced between stable and responsive.
+
+---
+
+## Final Thought
+
+This system isn’t built for “more trades.”
+It’s built for **fewer, higher-quality trades** with structure.
+
+Consistency comes from process — not prediction.
+""")
+
 
 ### 2) Today Watchlist
 The Watchlist is your daily short list.
