@@ -61,14 +61,8 @@ def analyze_ticker(
     meter = strength_label(strength)
 
     # --- STRAT trigger (expects DataFrame) ---
-  # --- STRAT trigger (handle older/newer versions safely) ---
-try:
-    trigger = best_trigger(df, direction=direction)   # NEW signature
-except TypeError:
-    try:
-        trigger = best_trigger(df)                    # older: best_trigger(df)
-    except TypeError:
-        trigger = best_trigger(close)                 # oldest: best_trigger(close)
+  trigger = best_trigger(close)
+
 
 
     # Optional: provide basic entry/stop if best_trigger returns levels
