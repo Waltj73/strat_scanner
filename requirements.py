@@ -1,6 +1,4 @@
-streamlit
-pandas
-numpy
-yfinance
-matplotlib
-
+streamlit>=1.36
+pandas>=2.2
+numpy>=1.26
+yfinance>=0.2.40
