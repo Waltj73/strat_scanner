@@ -50,7 +50,8 @@ def analyze_ticker(
 
     # --- REAL Strat trigger ---
     direction = "LONG" if trend == "UP" else "SHORT"
-    trigger = best_trigger(close)
+    trigger = best_trigger(df)
+
 
 
     return {
