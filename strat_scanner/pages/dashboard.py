@@ -1,3 +1,6 @@
+# strat_scanner/pages/dashboard.py
+# Market Dashboard page (rotation + strength + watchlist + writeups + quick analyzer)
+
 from datetime import datetime, timezone
 from typing import Dict, List
 
@@ -7,31 +10,63 @@ import streamlit as st
 
 from strat_scanner.data import get_hist
 from strat_scanner.indicators import (
-    rsi_wilder, rs_vs_spy, trend_label,
-    strength_meter, strength_label, pullback_zone_ok,
-    RS_CAP, ROT_CAP, clamp_float
+    rsi_wilder,
+    total_return,
+    rs_vs_spy,
+    trend_label,
+    clamp,
+    clamp_rs,
+    strength_meter,
+    strength_label,
 )
+from strat_scanner.strat import best_trigger
+from strat_scanner.engine import analyze_ticker, writeup_block
 
-MARKET_ETFS = {"SPY":"SPY","QQQ":"QQQ","IWM":"IWM","DIA":"DIA","^VIX":"^VIX"}
+# -------------------------
+# Universe (ETFs + tickers)
+# -------------------------
+MARKET_ETFS = {
+    "S&P 500": "SPY",
+    "Nasdaq 100": "QQQ",
+    "Russell 2000": "IWM",
+    "Dow Jones": "DIA",
+}
+
+METALS_ETFS = {
+    "Metals - Gold": "GLD",
+    "Metals - Silver": "SLV",
+    "Metals - Copper": "CPER",
+    "Metals - Platinum": "PPLT",
+    "Metals - Palladium": "PALL",
+}
 
 SECTOR_ETFS = {
-    "Energy":"XLE","Comm Services":"XLC","Staples":"XLP","Materials":"XLB","Industrials":"XLI",
-    "Real Estate":"XLRE","Discretionary":"XLY","Utilities":"XLU","Financials":"XLF","Technology":"XLK","Health Care":"XLV",
-    "Metals - Gold":"GLD","Metals - Silver":"SLV","Metals - Copper":"CPER","Metals - Platinum":"PPLT","Metals - Palladium":"PALL",
+    "Energy": "XLE",
+    "Comm Services": "XLC",
+    "Staples": "XLP",
+    "Materials": "XLB",
+    "Industrials": "XLI",
+    "Real Estate": "XLRE",
+    "Discretionary": "XLY",
+    "Utilities": "XLU",
+    "Financials": "XLF",
+    "Technology": "XLK",
+    "Health Care": "XLV",
+    **METALS_ETFS,
 }
 
 SECTOR_TICKERS: Dict[str, List[str]] = {
-    "Energy": ["XOM","CVX","COP","EOG","SLB","HAL","PSX","MPC","VLO","OXY"],
-    "Comm Services": ["GOOGL","META","NFLX","TMUS","VZ","DIS","CMCSA","TTWO","SPOT","ROKU"],
-    "Staples": ["PG","KO","PEP","WMT","COST","MDLZ","CL","KMB","GIS","HSY"],
-    "Materials": ["LIN","SHW","NUE","FCX","NEM","VMC","ALB","MOS","DD","APD"],
-    "Industrials": ["CAT","DE","HON","GE","LMT","RTX","BA","UNP","UPS","ETN"],
-    "Real Estate": ["PLD","AMT","EQIX","PSA","O","WELL","SPG","CCI","VICI","AVB"],
-    "Discretionary": ["AMZN","TSLA","HD","MCD","NKE","SBUX","LOW","BKNG","TJX","CMG"],
-    "Utilities": ["NEE","DUK","SO","AEP","EXC","XEL","SRE","ED","PEG","AWK"],
-    "Financials": ["BRK-B","JPM","BAC","WFC","GS","MS","C","BLK","SCHW","AXP"],
-    "Technology": ["AAPL","MSFT","NVDA","AVGO","CRM","ORCL","ADBE","AMD","QCOM","TXN"],
-    "Health Care": ["UNH","JNJ","LLY","PFE","MRK","ABBV","TMO","ABT","DHR","ISRG"],
+    "Energy": ["XOM","CVX","COP","EOG","SLB","HAL","PSX","MPC","VLO","OXY","KMI","WMB","BKR","DVN","PXD"],
+    "Comm Services": ["GOOGL","GOOG","META","NFLX","TMUS","VZ","T","DIS","CMCSA","CHTR","EA","TTWO","SPOT","ROKU","SNAP"],
+    "Staples": ["PG","KO","PEP","WMT","COST","PM","MO","MDLZ","CL","KMB","GIS","KHC","SYY","HSY","EL"],
+    "Materials": ["LIN","APD","SHW","NUE","DOW","PPG","ECL","FCX","NEM","IFF","MLM","VMC","ALB","MOS","DD"],
+    "Industrials": ["CAT","DE","HON","GE","LMT","RTX","BA","UNP","UPS","FDX","ETN","EMR","CSX","NSC","WM"],
+    "Real Estate": ["PLD","AMT","EQIX","PSA","O","WELL","DLR","SPG","CCI","VICI","AVB","EQR","IRM","SBAC","EXR"],
+    "Discretionary": ["AMZN","TSLA","HD","MCD","NKE","SBUX","LOW","BKNG","TJX","GM","F","MAR","ROST","ORLY","CMG"],
+    "Utilities": ["NEE","DUK","SO","D","AEP","EXC","XEL","SRE","ED","PEG","EIX","PCG","WEC","ES","AWK"],
+    "Financials": ["BRK-B","JPM","BAC","WFC","GS","MS","C","BLK","SCHW","AXP","SPGI","ICE","CME","PNC","TFC"],
+    "Technology": ["AAPL","MSFT","NVDA","AVGO","CRM","ORCL","ADBE","AMD","CSCO","INTC","QCOM","TXN","NOW","AMAT","MU"],
+    "Health Care": ["UNH","JNJ","LLY","PFE","MRK","ABBV","TMO","ABT","DHR","BMY","AMGN","GILD","ISRG","VRTX","MDT"],
     "Metals - Gold": ["GLD"],
     "Metals - Silver": ["SLV"],
     "Metals - Copper": ["CPER"],
@@ -39,188 +74,171 @@ SECTOR_TICKERS: Dict[str, List[str]] = {
     "Metals - Palladium": ["PALL"],
 }
 
-def meter_style(val: str) -> str:
-    if val == "STRONG":
-        return "background-color:#114b2b;color:white;font-weight:700;"
-    if val == "NEUTRAL":
-        return "background-color:#5a4b11;color:white;font-weight:700;"
-    return "background-color:#5a1111;color:white;font-weight:700;"
-
-def strength_style(v):
-    try:
-        x = float(v)
-    except Exception:
-        return ""
-    x = max(0.0, min(100.0, x))
-    # simple red→green
-    g = int((x / 100.0) * 120)
-    r = 120 - g
-    return f"background-color: rgb({r},{g},30); color: white; font-weight: 700;"
-
-def analyze_one(ticker: str, spy_close: pd.Series, rs_short: int, rs_long: int, ema_len: int, rsi_len: int):
-    d = get_hist(ticker)
-    if d.empty:
-        return None
-    close = d["Close"].dropna()
-    if len(close) < (rs_long + 20):
-        return None
-
-    tr = trend_label(close, ema_len)
-    rsi_v = float(rsi_wilder(close, rsi_len).iloc[-1])
-
-    rs_s = float(rs_vs_spy(close, spy_close, rs_short).iloc[-1])
-    rs_l = float(rs_vs_spy(close, spy_close, rs_long).iloc[-1])
-    rot = rs_s - rs_l
-
-    # cap so scores don’t saturate
-    rs_s_c = clamp_float(rs_s, -RS_CAP, RS_CAP)
-    rot_c = clamp_float(rot, -ROT_CAP, ROT_CAP)
-
-    strength = strength_meter(rs_s_c, rot_c, tr)
-    meter = strength_label(strength)
-
-    return {
-        "Ticker": ticker,
-        "Trend": tr,
-        "RSI": rsi_v,
-        "RS_short": rs_s,
-        "RS_long": rs_l,
-        "Rotation": rot,
-        "Strength": strength,
-        "Meter": meter
-    }
 
 def show_dashboard():
-    st.title("📊 Market Dashboard (Rotation • Strength • Leaders • Watchlist)")
+    st.title("📊 Market Dashboard (Sentiment • Rotation • Leaders • Watchlist)")
 
     with st.expander("Dashboard Settings", expanded=True):
-        c1, c2, c3, c4, c5 = st.columns([1,1,1,1,1.2])
+        c1, c2, c3, c4, c5 = st.columns([1.1, 1.1, 1.1, 1.1, 1.2])
         with c1:
-            rs_short = st.selectbox("RS short", [21, 30, 42], index=0)
+            rs_short = st.selectbox("RS Lookback (short)", [21, 30, 42], index=0)
         with c2:
-            rs_long = st.selectbox("RS long", [63, 90, 126], index=0)
+            rs_long = st.selectbox("RS Lookback (long)", [63, 90, 126], index=0)
         with c3:
-            ema_len = st.selectbox("Trend EMA", [50, 100, 200], index=0)
+            ema_trend_len = st.selectbox("Trend EMA", [50, 100, 200], index=0)
         with c4:
-            rsi_len = st.selectbox("RSI len", [7, 14, 21], index=1)
+            rsi_len = st.selectbox("RSI Length", [7, 14, 21], index=1)
         with c5:
             if st.button("Refresh data"):
                 st.cache_data.clear()
                 st.rerun()
 
-    with st.expander("Watchlist Settings", expanded=True):
-        w1, w2, w3, w4, w5 = st.columns([1,1,1,1,1.2])
+    with st.expander("Today Watchlist Settings", expanded=True):
+        w1, w2, w3, w4, w5 = st.columns([1, 1, 1, 1, 1.2])
         with w1:
-            top_sectors_in = st.slider("Top Sectors IN", 1, 8, 3)
+            top_sectors_in = st.slider("Top Sectors IN", 1, 6, 3)
         with w2:
             leaders_per_sector = st.slider("Leaders per sector", 3, 10, 5)
         with w3:
-            pb_low = st.slider("Pullback RSI Low", 25, 60, 40)
+            pb_low = st.slider("RSI Pullback Low (UP trend)", 25, 60, 40)
         with w4:
-            pb_high = st.slider("Pullback RSI High", 35, 75, 55)
+            pb_high = st.slider("RSI Pullback High (UP trend)", 35, 75, 55)
         with w5:
-            strict_pb = st.checkbox("Strict pullback only", value=False)
+            strict_pullback = st.checkbox("Strict pullback filter (only show RSI-in-zone)", value=False)
 
     st.caption(f"Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
 
-    # sentiment bar
+    # -------------------------
+    # Market sentiment panel
+    # -------------------------
     st.subheader("Overall Market Sentiment")
-    cols = st.columns(len(MARKET_ETFS))
-    for i, sym in enumerate(MARKET_ETFS.values()):
+    market_syms = list(MARKET_ETFS.values()) + ["^VIX"]
+    mcols = st.columns(len(market_syms))
+
+    for i, sym in enumerate(market_syms):
         d = get_hist(sym)
-        if d.empty:
-            cols[i].metric(sym, "n/a", "n/a")
+        if d is None or d.empty:
+            with mcols[i]:
+                st.metric(sym, "n/a", "n/a")
+            continue
+
+        close = d["Close"].dropna()
+        if close.empty or len(close) < 10:
+            with mcols[i]:
+                st.metric(sym, "n/a", "n/a")
+            continue
+
+        tr = trend_label(close, int(ema_trend_len))
+        r = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
+        ret = float(total_return(close, int(rs_short)).iloc[-1]) if len(close) > rs_short else np.nan
+
+        with mcols[i]:
+            st.metric(sym, f"{close.iloc[-1]:.2f}", f"{(ret*100):.1f}%" if np.isfinite(ret) else "n/a")
+            st.write(f"Trend: **{tr}**")
+            st.write(f"RSI: **{r:.1f}**")
+
+    # -------------------------
+    # SPY anchor
+    # -------------------------
+    spy_df = get_hist("SPY")
+    if spy_df is None or spy_df.empty:
+        st.warning("SPY data unavailable; cannot compute RS vs SPY.")
+        return
+
+    spy = spy_df["Close"].dropna()
+    if len(spy) < (rs_long + 10):
+        st.warning("Not enough SPY history for these lookbacks.")
+        return
+
+    # -------------------------
+    # Sector / metals rotation table
+    # -------------------------
+    st.subheader("Sector / Metals Rotation + Strength (Relative Strength vs SPY)")
+    sector_rows = []
+    for name, etf in SECTOR_ETFS.items():
+        d = get_hist(etf)
+        if d is None or d.empty:
             continue
         close = d["Close"].dropna()
-        if len(close) < 30:
-            cols[i].metric(sym, "n/a", "n/a")
+        if len(close) < (rs_long + 10):
             continue
-        tr = trend_label(close, ema_len)
-        r = float(rsi_wilder(close, rsi_len).iloc[-1])
-        ret = float((close.iloc[-1] / close.iloc[-rs_short] - 1)) if len(close) > rs_short else np.nan
-        cols[i].metric(sym, f"{close.iloc[-1]:.2f}", f"{ret*100:.1f}%" if np.isfinite(ret) else "n/a")
-        cols[i].write(f"Trend: **{tr}**")
-        cols[i].write(f"RSI: **{r:.1f}**")
 
-    spy_df = get_hist("SPY")
-    if spy_df.empty:
-        st.error("SPY data unavailable.")
-        return
-    spy_close = spy_df["Close"].dropna()
-    if len(spy_close) < (rs_long + 30):
-        st.error("Not enough SPY history for selected lookbacks.")
-        return
+        rs_s = float(rs_vs_spy(close, spy, int(rs_short)).iloc[-1])
+        rs_l = float(rs_vs_spy(close, spy, int(rs_long)).iloc[-1])
 
-    # sector rotation table
-    st.subheader("Sector / Metals Rotation + Strength (RS vs SPY)")
-    rows = []
-    for grp, etf in SECTOR_ETFS.items():
-        info = analyze_one(etf, spy_close, rs_short, rs_long, ema_len, rsi_len)
-        if not info:
-            continue
-        rows.append({
-            "Group": grp,
+        rot = rs_s - rs_l
+        tr = trend_label(close, int(ema_trend_len))
+        r = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
+
+        score = strength_meter(rs_s, rot, tr)
+        sector_rows.append({
+            "Group": name,
             "ETF": etf,
-            "Strength": info["Strength"],
-            "Meter": info["Meter"],
-            f"RS vs SPY ({rs_short})": info["RS_short"],
-            f"RS vs SPY ({rs_long})": info["RS_long"],
-            "Rotation (short-long)": info["Rotation"],
-            "Trend": info["Trend"],
-            "RSI": info["RSI"],
+            "Strength": int(score),
+            "Meter": strength_label(int(score)),
+            f"RS vs SPY ({rs_short})": rs_s,
+            f"RS vs SPY ({rs_long})": rs_l,
+            "Rotation (RS short - RS long)": rot,
+            "Trend": tr,
+            "RSI": r
         })
 
-    df = pd.DataFrame(rows)
-    if df.empty:
-        st.error("No sector ETF rows built (yfinance returned empty).")
+    sectors = pd.DataFrame(sector_rows)
+    if sectors.empty:
+        st.warning("Sector data unavailable right now. Try Refresh.")
         return
 
-    df = df.sort_values(["Strength","Rotation (short-long)"], ascending=[False, False])
+    sectors = sectors.sort_values(["Strength", "Rotation (RS short - RS long)"], ascending=[False, False])
 
-    styled = (
-        df.style
-        .format({
+    st.dataframe(
+        sectors.style.format({
             f"RS vs SPY ({rs_short})": "{:.2%}",
             f"RS vs SPY ({rs_long})": "{:.2%}",
-            "Rotation (short-long)": "{:.2%}",
+            "Rotation (RS short - RS long)": "{:.2%}",
             "RSI": "{:.1f}",
-        })
-        .applymap(meter_style, subset=["Meter"])
-        .applymap(strength_style, subset=["Strength"])
+        }),
+        use_container_width=True,
+        hide_index=True,
+        height=420
     )
-    st.dataframe(styled, use_container_width=True, hide_index=True, height=420)
 
-    # watchlist
+    # -------------------------
+    # Auto Watchlist
+    # -------------------------
     st.subheader("✅ Today Watchlist (Auto-built from Rotation IN + Leaders)")
-    top_groups = df.head(int(top_sectors_in))[["Group","ETF","Strength","Meter"]].to_dict("records")
-    st.write("Top Groups IN: " + ", ".join([f"{g['Group']}({g['ETF']}) {g['Meter']} {g['Strength']}" for g in top_groups]))
 
-    picks = []
+    top_groups = sectors.head(int(top_sectors_in))[["Group","ETF","Strength","Meter"]].to_dict("records")
+    st.write("**Top Groups IN:** " + ", ".join([f"{g['Group']}({g['ETF']}) {g['Meter']} {g['Strength']}" for g in top_groups]))
+
+    watchlist: List[Dict] = []
     for g in top_groups:
-        group = g["Group"]
-        names = SECTOR_TICKERS.get(group, [])
+        group_name = g["Group"]
+        names = SECTOR_TICKERS.get(group_name, [])
         if not names:
             continue
 
         infos = []
-        for t in names[:25]:
-            r = analyze_one(t, spy_close, rs_short, rs_long, ema_len, rsi_len)
-            if r:
-                r["Group"] = group
-                infos.append(r)
+        for sym in names[:min(30, len(names))]:
+            info = analyze_ticker(sym, spy, int(rs_short), int(rs_long), int(ema_trend_len), int(rsi_len))
+            if info is not None:
+                info["Group"] = group_name
+                infos.append(info)
+
+        if not infos:
+            continue
 
         infos = sorted(infos, key=lambda x: (x["Strength"], x["Rotation"], x["RS_short"]), reverse=True)
 
-        if strict_pb:
-            infos = [x for x in infos if pullback_zone_ok(x["Trend"], x["RSI"], pb_low, pb_high)]
+        if strict_pullback:
+            infos = [x for x in infos if (x["Trend"] == "UP" and pb_low <= x["RSI"] <= pb_high)]
 
-        picks.extend(infos[:leaders_per_sector])
+        watchlist.extend(infos[:int(leaders_per_sector)])
 
-    if not picks:
-        st.warning("Watchlist empty with current settings. Loosen strict pullback.")
+    if not watchlist:
+        st.warning("Watchlist is empty under current settings. Loosen pullback filter or increase scan sizes.")
         return
 
-    wdf = pd.DataFrame([{
+    watch_df = pd.DataFrame([{
         "Group": x["Group"],
         "Ticker": x["Ticker"],
         "Strength": x["Strength"],
@@ -229,18 +247,43 @@ def show_dashboard():
         "RSI": x["RSI"],
         f"RS vs SPY ({rs_short})": x["RS_short"],
         "Rotation": x["Rotation"],
-    } for x in picks]).sort_values(["Strength","Rotation"], ascending=[False, False])
+        "Trigger": x["TriggerStatus"],
+        "TF": x["TF"],
+        "Entry": x["Entry"],
+        "Stop": x["Stop"],
+    } for x in watchlist]).sort_values(["Strength","Rotation"], ascending=[False, False])
 
-    wstyled = (
-        wdf.style
-        .format({
+    st.dataframe(
+        watch_df.style.format({
             f"RS vs SPY ({rs_short})": "{:.2%}",
             "Rotation": "{:.2%}",
-            "RSI": "{:.1f}"
-        })
-        .applymap(meter_style, subset=["Meter"])
-        .applymap(strength_style, subset=["Strength"])
+            "RSI": "{:.1f}",
+        }),
+        use_container_width=True,
+        hide_index=True,
+        height=420
     )
-    st.dataframe(wstyled, use_container_width=True, hide_index=True, height=420)
 
+    # -------------------------
+    # Watchlist Write-ups
+    # -------------------------
+    st.write("### 📌 Watchlist Write-ups (click to expand)")
+    for rec in watch_df.head(20).to_dict("records"):
+        full = analyze_ticker(rec["Ticker"], spy, int(rs_short), int(rs_long), int(ema_trend_len), int(rsi_len))
+        if full is None:
+            continue
+        full["Group"] = rec["Group"]
+        with st.expander(f"{full['Group']} — {full['Ticker']} | {full['Meter']} {full['Strength']}/100 | {full['TriggerStatus']}"):
+            writeup_block(full, pb_low, pb_high)
 
+    # -------------------------
+    # Quick Search
+    # -------------------------
+    st.subheader("🔎 Quick Ticker Search (Why is this a candidate?)")
+    q = st.text_input("Type a ticker:", value="AAPL")
+    if q:
+        info = analyze_ticker(q.strip().upper(), spy, int(rs_short), int(rs_long), int(ema_trend_len), int(rsi_len))
+        if info is None:
+            st.warning("No data returned (bad ticker or yfinance empty). Try another symbol.")
+        else:
+            writeup_block(info, pb_low, pb_high)
