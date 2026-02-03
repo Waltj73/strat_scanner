@@ -7,7 +7,9 @@ import streamlit as st
 
 from strat_scanner.data import get_hist
 from strat_scanner.indicators import rsi_wilder, total_return, rs_vs_spy, trend_label, strength_meter, strength_label
-from strat_scanner.engine import analyze_ticker, writeup_block
+from strat_scanner.engine import analyze_ticker
+from strat_scanner.ui import writeup_block
+
 
 MARKET_ETFS = {"SPY":"SPY","QQQ":"QQQ","IWM":"IWM","DIA":"DIA"}
 
