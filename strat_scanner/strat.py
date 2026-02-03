@@ -1,74 +1,81 @@
 # strat_scanner/strat.py
 from __future__ import annotations
 
-from typing import Optional, Union
+from dataclasses import dataclass
+from typing import Optional
 import pandas as pd
 
 
-def best_trigger(data: Union[pd.DataFrame, pd.Series], direction: Optional[str] = None) -> str:
-    """
-    Robust STRAT trigger:
-    - Accepts either OHLC DataFrame OR Close Series.
-    - Accepts direction keyword safely ("LONG"/"SHORT"/None).
-    - Never crashes: returns WAIT labels if data missing.
-    """
+@dataclass
+class StratInfo:
+    bar: str                 # "1", "2U", "2D", "3"
+    is_inside: bool
+    is_outside: bool
+    trigger: str             # user-facing text
 
-    if data is None:
-        return "WAIT (No Data)"
+
+def _bar_type(prev_high: float, prev_low: float, high: float, low: float) -> tuple[str, bool, bool]:
+    inside = (high <= prev_high) and (low >= prev_low)
+    outside = (high > prev_high) and (low < prev_low)
+
+    if inside:
+        return "1", True, False
+    if outside:
+        return "3", False, True
+
+    # directional 2s
+    if (high > prev_high) and (low >= prev_low):
+        return "2U", False, False
+    if (low < prev_low) and (high <= prev_high):
+        return "2D", False, False
+
+    # weird overlap edge case (should be rare)
+    return "?", False, False
+
+
+def strat_signal(df: pd.DataFrame, direction: Optional[str] = None) -> StratInfo:
+    """
+    STRAT bar classification + simple trigger message.
+    direction: "LONG" | "SHORT" | None
+    """
+    if df is None or df.empty:
+        return StratInfo(bar="?", is_inside=False, is_outside=False, trigger="WAIT (No Data)")
+
+    needed = {"High", "Low", "Close", "Open"}
+    if not needed.issubset(df.columns):
+        return StratInfo(bar="?", is_inside=False, is_outside=False, trigger="WAIT (Missing OHLC)")
+
+    if len(df) < 2:
+        return StratInfo(bar="?", is_inside=False, is_outside=False, trigger="WAIT (Not Enough Bars)")
 
     d = (direction or "").upper().strip()
     if d not in ("LONG", "SHORT"):
         d = "NONE"
 
-    # --- Case 1: Series (Close only) fallback ---
-    if isinstance(data, pd.Series):
-        close = data.dropna()
-        if close.empty or len(close) < 3:
-            return "WAIT (No Data)"
-        if close.iloc[-1] > close.iloc[-2] > close.iloc[-3]:
-            return "READY (Momentum)"
-        return "WAIT"
-
-    # --- Case 2: DataFrame (preferred) ---
-    df = data
-    if df.empty:
-        return "WAIT (No Data)"
-
-    need = {"Open", "High", "Low", "Close"}
-    if not need.issubset(df.columns):
-        # If we only have Close, degrade gracefully
-        if "Close" in df.columns:
-            return best_trigger(df["Close"], direction=direction)
-        return "WAIT (Missing OHLC)"
-
-    if len(df) < 2:
-        return "WAIT (Not Enough Bars)"
-
     prev = df.iloc[-2]
     cur = df.iloc[-1]
 
-    prev_high, prev_low = float(prev["High"]), float(prev["Low"])
-    cur_high, cur_low = float(cur["High"]), float(cur["Low"])
+    bar, inside, outside = _bar_type(
+        float(prev["High"]), float(prev["Low"]),
+        float(cur["High"]), float(cur["Low"])
+    )
 
-    inside = (cur_high <= prev_high) and (cur_low >= prev_low)   # 1
-    outside = (cur_high > prev_high) and (cur_low < prev_low)    # 3
-    two_up = (cur_high > prev_high) and (cur_low >= prev_low)    # 2U
-    two_dn = (cur_low < prev_low) and (cur_high <= prev_high)    # 2D
-
+    # Basic trigger language
     if inside:
         if d == "LONG":
-            return "WAIT (Inside) — break HIGH"
-        if d == "SHORT":
-            return "WAIT (Inside) — break LOW"
-        return "WAIT (Inside)"
+            trig = "WAIT (Inside) — break HIGH"
+        elif d == "SHORT":
+            trig = "WAIT (Inside) — break LOW"
+        else:
+            trig = "WAIT (Inside) — wait for break"
+        return StratInfo(bar=bar, is_inside=True, is_outside=False, trigger=trig)
 
     if outside:
-        return "WAIT (Outside) — confirm"
+        return StratInfo(bar=bar, is_inside=False, is_outside=True, trigger="WAIT (Outside) — confirm next bar")
 
-    if two_up:
-        return "READY (2U)"
+    if bar == "2U":
+        return StratInfo(bar=bar, is_inside=False, is_outside=False, trigger="READY (2U continuation)")
+    if bar == "2D":
+        return StratInfo(bar=bar, is_inside=False, is_outside=False, trigger="READY (2D continuation)")
 
-    if two_dn:
-        return "READY (2D)"
-
-    return "WAIT"
+    return StratInfo(bar=bar, is_inside=False, is_outside=False, trigger="WAIT")
