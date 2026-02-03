@@ -1,7 +1,10 @@
 from __future__ import annotations
 from typing import Optional, Dict
+from strat_scanner.strat import best_trigger
+
 
 import pandas as pd
+
 
 from strat_scanner.data import get_hist
 from strat_scanner.indicators import (
@@ -50,16 +53,17 @@ def analyze_ticker(
     trigger = best_trigger(df, direction=direction)
 
     return {
-        "Ticker": ticker.upper(),
-        "Strength": strength,
-        "Meter": meter,
-        "Trend": trend,
-        "RSI": rsi,
-        "RS_short": rs_s,
-        "RS_long": rs_l,
-        "Rotation": rot,
-        "TriggerStatus": trigger.status,
-        "TF": trigger.tf,
-        "Entry": trigger.entry,
-        "Stop": trigger.stop,
-    }
+    "Ticker": ticker.upper(),
+    "Strength": strength,
+    "Meter": meter,
+    "Trend": tr,
+    "RSI": rsi,
+    "RS_short": rs_s,
+    "RS_long": rs_l,
+    "Rotation": rot,
+    "TriggerStatus": best_trigger(df),
+    "TF": "D",
+    "Entry": entry,
+    "Stop": stop,
+}
+
