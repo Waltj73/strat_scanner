@@ -1,8 +1,9 @@
-# app.py — STRAT Regime Scanner V1.2
-# Adds:
-# - Today Watchlist Builder (Top sectors IN + leaders + filters)
-# - Ticker Analyzer page (type ticker -> why it scores + STRAT trigger info)
-# - Explainable write-ups per ticker
+# app.py — STRAT Regime Scanner V1.2.1 (Merged)
+# Includes:
+# - Scanner (full STRAT regime + triggers + ranking)
+# - Market Dashboard (sentiment + sector strength/rotation + leaders)
+# - Today Watchlist Builder (#5)
+# - Ticker Analyzer (search + explain scoring + STRAT trigger context)
 # - RS/Rotation caps for stable strength meter
 
 import math
@@ -17,7 +18,7 @@ import yfinance as yf
 # =========================
 # STREAMLIT CONFIG
 # =========================
-st.set_page_config(page_title="STRAT Regime Scanner V1.2", layout="wide")
+st.set_page_config(page_title="STRAT Regime Scanner V1.2.1", layout="wide")
 
 # =========================
 # UNIVERSE
@@ -75,7 +76,7 @@ SECTOR_TICKERS: Dict[str, List[str]] = {
 REQUIRED_COLS = ["Open", "High", "Low", "Close", "Volume"]
 
 # =========================
-# DATA FETCH (CACHED)
+# DATA FETCH (CACHED) — HARDENED
 # =========================
 def _ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -106,6 +107,7 @@ def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
+    # MultiIndex handling (common on cloud)
     if isinstance(df.columns, pd.MultiIndex):
         lvl0 = df.columns.get_level_values(0)
         lvl1 = df.columns.get_level_values(1)
@@ -123,6 +125,7 @@ def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
         else:
             df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
 
+    # Normalize names
     rename_map = {}
     for c in df.columns:
         if not isinstance(c, str):
@@ -138,6 +141,7 @@ def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     if rename_map:
         df = df.rename(columns=rename_map)
 
+    # If Close missing but Adj Close exists, map it
     if "Close" not in df.columns:
         for alt in ["Adj Close", "adj close", "Adj_Close", "AdjClose"]:
             if alt in df.columns:
@@ -154,6 +158,7 @@ def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     df = df[needed].copy()
     df = _dedupe_columns(df)
 
+    # Force numeric safely
     for c in needed:
         if c in df.columns and isinstance(df[c], pd.DataFrame):
             df[c] = df[c].iloc[:, 0]
@@ -213,6 +218,7 @@ def resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
         "Close": g["Close"].apply(safe_last),
         "Volume": g["Volume"].sum(),
     }).dropna(subset=["Open", "High", "Low", "Close"])
+
     return out
 
 # =========================
@@ -243,8 +249,9 @@ def clamp_rs(x, lo, hi):
     except Exception:
         return 0.0
 
-RS_CAP = 0.10     # ±10% cap
-ROT_CAP = 0.08    # ±8% cap
+# Caps (stable scoring)
+RS_CAP = 0.10      # ±10% cap for RS vs SPY
+ROT_CAP = 0.08     # ±8% cap for Rotation
 
 def strength_meter(rs_short_v: float, rotation_v: float, trend: str) -> int:
     rs_short_v = clamp_rs(rs_short_v, -RS_CAP, RS_CAP)
@@ -283,6 +290,17 @@ def strength_style(v):
         t = (x - 50.0) / 50.0
         r, g, b = int(90 + (17 - 90) * t), 75, int(17 + (43 - 17) * t)
     return f"background-color: rgb({r},{g},{b}); color: white; font-weight: 600;"
+
+def trend_label(series: pd.Series, ema_len: int) -> str:
+    e = ema(series, ema_len)
+    up = bool(series.iloc[-1] > e.iloc[-1] and e.iloc[-1] > e.iloc[-2])
+    return "UP" if up else "DOWN/CHOP"
+
+def pullback_zone_ok(trend: str, rsi_val: float, pb_low: float, pb_high: float) -> bool:
+    # Simple: only valid when trend is UP (for longs)
+    if trend != "UP":
+        return False
+    return (pb_low <= rsi_val <= pb_high)
 
 # =========================
 # STRAT HELPERS (Scanner + Analyzer)
@@ -342,6 +360,17 @@ def strat_212_dn(df: pd.DataFrame) -> bool:
     prev_a = df.iloc[-4]
     return is_2dn(a, prev_a) and is_inside_bar(b, a) and is_2dn(c, b)
 
+def atr14(df: pd.DataFrame) -> float:
+    if df is None or df.empty or len(df) < 20:
+        return float("nan")
+    h, l, c = df["High"], df["Low"], df["Close"]
+    prev_c = c.shift(1)
+    tr = pd.concat([(h - l).abs(), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    return float(tr.rolling(14).mean().iloc[-1])
+
+def clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
 def tf_frames(daily: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     d = daily.copy()
     w = resample_ohlc(daily, "W-FRI")
@@ -384,7 +413,7 @@ def market_bias_and_strength(market_rows: List[Dict]) -> Tuple[str, int, int]:
     bull_total = sum(r["BullScore"] for r in market_rows)
     bear_total = sum(r["BearScore"] for r in market_rows)
     diff = bull_total - bear_total
-    strength = int(max(0, min(100, 50 + diff * 5)))
+    strength = int(clamp(50 + diff * 5, 0, 100))
     if diff >= 3:
         bias = "LONG"
     elif diff <= -3:
@@ -392,6 +421,13 @@ def market_bias_and_strength(market_rows: List[Dict]) -> Tuple[str, int, int]:
     else:
         bias = "MIXED"
     return bias, strength, diff
+
+def alignment_ok(bias: str, flags: Dict[str, bool]) -> bool:
+    if bias == "LONG":
+        return flags["M_Bull"] or flags["W_Bull"]
+    if bias == "SHORT":
+        return flags["M_Bear"] or flags["W_Bear"]
+    return False
 
 def best_trigger(bias: str, d: pd.DataFrame, w: pd.DataFrame) -> Tuple[Optional[str], Optional[float], Optional[float]]:
     # Weekly inside bar preferred
@@ -407,20 +443,110 @@ def best_trigger(bias: str, d: pd.DataFrame, w: pd.DataFrame) -> Tuple[Optional[
 
     return None, None, None
 
-# =========================
-# EXPLAINABLE SCORING + ANALYZER
-# =========================
-def trend_label(series: pd.Series, ema_len: int) -> str:
-    e = ema(series, ema_len)
-    up = bool(series.iloc[-1] > e.iloc[-1] and e.iloc[-1] > e.iloc[-2])
-    return "UP" if up else "DOWN/CHOP"
+def magnitude_metrics(
+    bias: str,
+    d: pd.DataFrame,
+    entry: Optional[float],
+    stop: Optional[float]
+) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    if d is None or d.empty or len(d) < 80:
+        return None, None, None, None
 
-def pullback_zone_ok(trend: str, rsi_val: float, pb_low: float, pb_high: float) -> bool:
-    # Simple: only apply pullback zone when trend is UP (for longs). If trend is DOWN/CHOP, fail.
-    if trend != "UP":
-        return False
-    return (pb_low <= rsi_val <= pb_high)
+    close = float(d["Close"].iloc[-1])
+    atr = atr14(d)
+    if not math.isfinite(atr) or atr <= 0:
+        return None, None, None, None
 
+    atrp = (atr / close) * 100.0
+
+    if entry is None or stop is None:
+        return None, atrp, None, None
+
+    hi63 = float(d["High"].rolling(63).max().iloc[-1])
+    lo63 = float(d["Low"].rolling(63).min().iloc[-1])
+
+    if bias == "LONG":
+        target = hi63
+        room = max(0.0, target - entry)
+        risk = entry - stop
+        reward = target - entry
+    else:
+        target = lo63
+        room = max(0.0, entry - target)
+        risk = stop - entry
+        reward = entry - target
+
+    rr = None if risk <= 0 else (reward / risk if reward > 0 else 0.0)
+
+    compression = None
+    if strat_inside(d) and len(d) >= 2:
+        cur = d.iloc[-1]
+        rng = float(cur["High"] - cur["Low"])
+        compression = rng / atr if atr > 0 else None
+
+    return rr, atrp, room, compression
+
+def calc_scores(
+    bias: str,
+    flags: Dict[str, bool],
+    rr: Optional[float],
+    atrp: Optional[float],
+    compression: Optional[float],
+    entry: Optional[float],
+    stop: Optional[float],
+) -> Tuple[int, int, int]:
+    setup = 0
+    mag = 0
+
+    if bias == "LONG":
+        setup += 30 if flags["M_Bull"] else 0
+        setup += 20 if flags["W_Bull"] else 0
+        setup += 10 if flags["D_Bull"] else 0
+        setup += 20 if flags["W_212Up"] else 0
+        setup += 10 if flags["D_212Up"] else 0
+    elif bias == "SHORT":
+        setup += 30 if flags["M_Bear"] else 0
+        setup += 20 if flags["W_Bear"] else 0
+        setup += 10 if flags["D_Bear"] else 0
+        setup += 20 if flags["W_212Dn"] else 0
+        setup += 10 if flags["D_212Dn"] else 0
+
+    setup += 10 if flags["W_Inside"] else 0
+    setup += 5 if flags["D_Inside"] else 0
+
+    if rr is not None:
+        if rr >= 3:
+            mag += 35
+        elif rr >= 2:
+            mag += 25
+        elif rr >= 1.5:
+            mag += 10
+
+    if atrp is not None:
+        if atrp >= 3:
+            mag += 20
+        elif atrp >= 2:
+            mag += 10
+        elif atrp >= 1:
+            mag += 5
+
+    if compression is not None:
+        if compression <= 0.6:
+            mag += 15
+        elif compression <= 0.9:
+            mag += 8
+        elif compression <= 1.2:
+            mag += 3
+
+    if entry is not None and stop is not None:
+        mag += 5
+
+    total = setup + mag
+    return setup, mag, total
+
+# =========================
+# ANALYZER (Explainable Ticker Write-up)
+# =========================
 def analyze_ticker(
     ticker: str,
     spy_close: pd.Series,
@@ -437,7 +563,7 @@ def analyze_ticker(
     if close.empty or len(close) < max(rs_long, 80) + 10:
         return None
 
-    trend = trend_label(close, ema_trend_len)
+    tr = trend_label(close, ema_trend_len)
     rsi_v = float(rsi_wilder(close, rsi_len).iloc[-1])
 
     rs_s = float(rs_vs_spy(close, spy_close, rs_short).iloc[-1])
@@ -449,10 +575,10 @@ def analyze_ticker(
     rot = rs_s - rs_l
     rot_c = clamp_rs(rot, -ROT_CAP, ROT_CAP)
 
-    strength = strength_meter(rs_s_c, rot_c, trend)
+    strength = strength_meter(rs_s_c, rot_c, tr)
     meter = strength_label(strength)
 
-    # STRAT flags + trigger
+    # STRAT flags + trigger (LONG context by default)
     d_tf, w_tf, m_tf = tf_frames(d)
     flags = compute_flags(d_tf, w_tf, m_tf)
 
@@ -461,12 +587,14 @@ def analyze_ticker(
     entry = None if entry is None else round(float(entry), 2)
     stop  = None if stop  is None else round(float(stop), 2)
 
-    # Explanation (why the numbers add up)
-    rs_note = f"RS vs SPY short ({rs_short}) = {rs_s*100:.1f}% (capped to {rs_s_c*100:.1f}%)"
-    rl_note = f"RS vs SPY long ({rs_long}) = {rs_l*100:.1f}% (capped to {rs_l_c*100:.1f}%)"
-    rot_note = f"Rotation = (RS short - RS long) = {rot*100:.1f}% (capped to {rot_c*100:.1f}%)"
-    trend_note = f"Trend = {trend} (price vs {ema_trend_len} EMA)"
-    rsi_note = f"RSI({rsi_len}) = {rsi_v:.1f}"
+    explain = [
+        f"Trend = {tr} (price vs {ema_trend_len} EMA)",
+        f"RSI({rsi_len}) = {rsi_v:.1f}",
+        f"RS vs SPY short ({rs_short}) = {rs_s*100:.1f}% (capped to {rs_s_c*100:.1f}%)",
+        f"RS vs SPY long ({rs_long}) = {rs_l*100:.1f}% (capped to {rs_l_c*100:.1f}%)",
+        f"Rotation = (RS short - RS long) = {rot*100:.1f}% (capped to {rot_c*100:.1f}%)",
+        f"Strength Score = {strength}/100 ({meter})",
+    ]
 
     strat_note = []
     if flags["M_Bull"]: strat_note.append("Monthly: Bull")
@@ -481,7 +609,7 @@ def analyze_ticker(
 
     return {
         "Ticker": ticker.upper(),
-        "Trend": trend,
+        "Trend": tr,
         "RSI": rsi_v,
         "RS_short": rs_s,
         "RS_long": rs_l,
@@ -493,7 +621,7 @@ def analyze_ticker(
         "Entry": entry,
         "Stop": stop,
         "Flags": flags,
-        "Explain": [trend_note, rsi_note, rs_note, rl_note, rot_note, f"Strength Score = {strength}/100 ({meter})"],
+        "Explain": explain,
         "STRAT_Notes": strat_note,
     }
 
@@ -509,8 +637,10 @@ def writeup_block(info: Dict, pb_low: float, pb_high: float) -> None:
     pb_ok = pullback_zone_ok(info["Trend"], info["RSI"], pb_low, pb_high)
     st.write(f"**Pullback Zone ({pb_low}-{pb_high}) OK?** {'✅ YES' if pb_ok else '❌ NO'}")
 
-    st.write(f"**Trigger:** {info['TriggerStatus']}"
-             + (f" | TF: {info['TF']} | Entry: {info['Entry']} | Stop: {info['Stop']}" if info["Entry"] else ""))
+    st.write(
+        f"**Trigger:** {info['TriggerStatus']}"
+        + (f" | TF: **{info['TF']}** | Entry: **{info['Entry']}** | Stop: **{info['Stop']}**" if info["Entry"] else "")
+    )
 
     with st.expander("Why this scores the way it does"):
         for line in info["Explain"]:
@@ -523,29 +653,29 @@ def writeup_block(info: Dict, pb_low: float, pb_high: float) -> None:
 # PAGES
 # =========================
 def show_user_guide():
-    st.title("📘 STRAT Regime Scanner — User Guide (V1.2)")
+    st.title("📘 STRAT Regime Scanner — User Guide (V1.2.1)")
     st.markdown("""
 ## What this app does
 - **Scanner**: STRAT regime + inside bar triggers + ranked trade ideas
 - **Market Dashboard**: overall sentiment + sector rotation + strength leaders
 - **Today Watchlist**: auto-builds a list of names based on rotation/strength + filters
-- **Ticker Analyzer**: type any ticker and see exactly *why* it is scoring the way it is
+- **Ticker Analyzer**: type any ticker and see exactly why it is scoring the way it is
 
 ---
 
 ## Today Watchlist logic (simple + usable)
 1) Take **Top N sectors IN** by Strength
 2) Pick **Top K leaders** inside each sector
-3) Apply filters (Trend UP + RSI pullback zone)
-4) Provide a short explanation per ticker (RS/Rotation/Trend/Trigger)
+3) Optional filter: **Trend UP + RSI pullback zone**
+4) Each ticker includes an expandable write-up (why it scores + STRAT triggers)
 """)
 
 def show_market_dashboard():
-    st.title("📊 Market Dashboard (Sentiment • Rotation • Leaders) — V1.2")
-    st.caption("Strength meter is capped for stability. Includes Today Watchlist + ticker write-ups.")
+    st.title("📊 Market Dashboard (Sentiment • Rotation • Leaders • Watchlist) — V1.2.1")
+    st.caption("Strength meter is capped for stability. Includes Today Watchlist Builder + ticker write-ups.")
 
     with st.expander("Dashboard Settings", expanded=True):
-        c1, c2, c3, c4, c5 = st.columns([1.1, 1.1, 1.1, 1.1, 1.3])
+        c1, c2, c3, c4, c5 = st.columns([1.1, 1.1, 1.1, 1.1, 1.2])
         with c1:
             rs_short = st.selectbox("RS Lookback (short)", [21, 30, 42], index=0)
         with c2:
@@ -559,9 +689,8 @@ def show_market_dashboard():
                 st.cache_data.clear()
                 st.rerun()
 
-    # Watchlist settings
     with st.expander("Today Watchlist Settings", expanded=True):
-        w1, w2, w3, w4 = st.columns([1, 1, 1, 1])
+        w1, w2, w3, w4, w5 = st.columns([1, 1, 1, 1, 1.2])
         with w1:
             top_sectors_in = st.slider("Top Sectors IN", 1, 6, 3)
         with w2:
@@ -570,8 +699,9 @@ def show_market_dashboard():
             pb_low = st.slider("RSI Pullback Low (UP trend)", 25, 60, 40)
         with w4:
             pb_high = st.slider("RSI Pullback High (UP trend)", 35, 75, 55)
+        with w5:
+            strict_pullback = st.checkbox("Strict pullback filter (only show RSI-in-zone)", value=False)
 
-    # --- Market sentiment cards
     st.subheader("Overall Market Sentiment")
     market_syms = list(MARKET_ETFS.values()) + ["^VIX"]
     mcols = st.columns(len(market_syms))
@@ -594,7 +724,7 @@ def show_market_dashboard():
         ret = float(total_return(close, int(rs_short)).iloc[-1]) if len(close) > rs_short else np.nan
 
         with mcols[i]:
-            st.metric(sym соединуется:=sym, value=f"{close.iloc[-1]:.2f}", delta=f"{(ret*100):.1f}%" if np.isfinite(ret) else "n/a")
+            st.metric(sym, f"{close.iloc[-1]:.2f}", f"{(ret*100):.1f}%" if np.isfinite(ret) else "n/a")
             st.write(f"Trend: **{tr}**")
             st.write(f"RSI: **{r:.1f}**")
 
@@ -608,7 +738,7 @@ def show_market_dashboard():
         st.warning("Not enough SPY history for these lookbacks.")
         return
 
-    # --- Sector table
+    # Sector / Metals table
     st.subheader("Sector / Metals Rotation + Strength (Relative Strength vs SPY)")
     sector_rows = []
     for name, etf in SECTOR_ETFS.items():
@@ -621,6 +751,7 @@ def show_market_dashboard():
 
         rs_s = float(rs_vs_spy(close, spy, int(rs_short)).iloc[-1])
         rs_l = float(rs_vs_spy(close, spy, int(rs_long)).iloc[-1])
+
         rs_s_c = clamp_rs(rs_s, -RS_CAP, RS_CAP)
         rs_l_c = clamp_rs(rs_l, -RS_CAP, RS_CAP)
 
@@ -641,7 +772,7 @@ def show_market_dashboard():
             f"RS vs SPY ({rs_long})": rs_l,
             "Rotation (RS short - RS long)": rot,
             "Trend": tr,
-            "RSI": r,
+            "RSI": r
         })
 
     sectors = pd.DataFrame(sector_rows)
@@ -663,18 +794,64 @@ def show_market_dashboard():
         .applymap(meter_style, subset=["Meter"])
         .applymap(strength_style, subset=["Strength"])
     )
+
     st.dataframe(styled, use_container_width=True, hide_index=True, height=420)
+
+    # Leaders in group
+    st.subheader("Leaders Inside a Group (with Strength Meter)")
+    group_choice = st.selectbox("Choose a group to drill into:", options=list(SECTOR_TICKERS.keys()), index=0)
+    leaders = SECTOR_TICKERS.get(group_choice, [])
+    if not leaders:
+        st.info("No tickers configured for this group.")
+    else:
+        max_scan = min(30, len(leaders))
+        scan_n = st.slider("How many names to check", 1, max_scan, value=min(15, max_scan))
+        scan_list = leaders[:scan_n]
+
+        rows = []
+        for sym in scan_list:
+            info = analyze_ticker(sym, spy, int(rs_short), int(rs_long), int(ema_trend_len), int(rsi_len))
+            if info is None:
+                continue
+            rows.append(info)
+
+        if rows:
+            ldf = pd.DataFrame([{
+                "Ticker": x["Ticker"],
+                "Strength": x["Strength"],
+                "Meter": x["Meter"],
+                "Trend": x["Trend"],
+                "RSI": x["RSI"],
+                f"RS vs SPY ({rs_short})": x["RS_short"],
+                f"RS vs SPY ({rs_long})": x["RS_long"],
+                "Rotation": x["Rotation"],
+                "Trigger": x["TriggerStatus"],
+                "TF": x["TF"],
+                "Entry": x["Entry"],
+                "Stop": x["Stop"],
+            } for x in rows]).sort_values(["Strength","Rotation"], ascending=[False, False])
+
+            lstyled = (
+                ldf.style
+                .format({
+                    f"RS vs SPY ({rs_short})": "{:.2%}",
+                    f"RS vs SPY ({rs_long})": "{:.2%}",
+                    "Rotation": "{:.2%}",
+                    "RSI": "{:.1f}"
+                })
+                .applymap(meter_style, subset=["Meter"])
+                .applymap(strength_style, subset=["Strength"])
+            )
+            st.dataframe(lstyled, use_container_width=True, hide_index=True, height=420)
+        else:
+            st.info("No leader data returned (try Refresh).")
 
     # =========================
     # TODAY WATCHLIST BUILDER
     # =========================
-    st.subheader("✅ Today Watchlist (Auto-built from Rotation IN + Leaders + Filters)")
+    st.subheader("✅ Today Watchlist (Auto-built from Rotation IN + Leaders)")
 
     top_groups = sectors.head(int(top_sectors_in))[["Group","ETF","Strength","Meter"]].to_dict("records")
-    if not top_groups:
-        st.info("No top groups available (data issue).")
-        return
-
     st.write("**Top Groups IN:** " + ", ".join([f"{g['Group']}({g['ETF']}) {g['Meter']} {g['Strength']}" for g in top_groups]))
 
     watchlist: List[Dict] = []
@@ -684,37 +861,28 @@ def show_market_dashboard():
         if not names:
             continue
 
-        rows = []
+        infos = []
         for sym in names[:min(30, len(names))]:
             info = analyze_ticker(sym, spy, int(rs_short), int(rs_long), int(ema_trend_len), int(rsi_len))
-            if info is None:
-                continue
-            rows.append(info)
+            if info is not None:
+                info["Group"] = group_name
+                infos.append(info)
 
-        if not rows:
+        if not infos:
             continue
 
-        # Rank inside sector by Strength then Rotation then RS_short
-        rows = sorted(rows, key=lambda x: (x["Strength"], x["Rotation"], x["RS_short"]), reverse=True)
+        infos = sorted(infos, key=lambda x: (x["Strength"], x["Rotation"], x["RS_short"]), reverse=True)
 
-        # Apply filters: Trend UP + RSI pullback zone
-        filtered = []
-        for info in rows:
-            if pullback_zone_ok(info["Trend"], info["RSI"], pb_low, pb_high):
-                filtered.append(info)
+        if strict_pullback:
+            infos = [x for x in infos if pullback_zone_ok(x["Trend"], x["RSI"], pb_low, pb_high)]
 
-        # If filters too strict, fall back to top leaders (so it still returns something)
-        pick = (filtered if filtered else rows)[:int(leaders_per_sector)]
-
-        for info in pick:
-            info["Group"] = group_name
-            watchlist.append(info)
+        pick = infos[:int(leaders_per_sector)]
+        watchlist.extend(pick)
 
     if not watchlist:
-        st.warning("Watchlist is empty under current settings. Loosen RSI pullback zone or increase leaders/sector.")
+        st.warning("Watchlist is empty under current settings. Loosen pullback filter or increase scan sizes.")
         return
 
-    # Watchlist table
     wdf = pd.DataFrame([{
         "Group": x["Group"],
         "Ticker": x["Ticker"],
@@ -728,13 +896,10 @@ def show_market_dashboard():
         "TF": x["TF"],
         "Entry": x["Entry"],
         "Stop": x["Stop"],
-    } for x in watchlist])
-
-    wdf = wdf.sort_values(["Strength", "Rotation"], ascending=[False, False])
+    } for x in watchlist]).sort_values(["Strength","Rotation"], ascending=[False, False])
 
     wstyled = (
-        wdf
-        .style
+        wdf.style
         .format({
             f"RS vs SPY ({rs_short})": "{:.2%}",
             "Rotation": "{:.2%}",
@@ -743,66 +908,55 @@ def show_market_dashboard():
         .applymap(meter_style, subset=["Meter"])
         .applymap(strength_style, subset=["Strength"])
     )
-
     st.dataframe(wstyled, use_container_width=True, hide_index=True, height=420)
 
-    st.caption("Tip: If you want ONLY pullback candidates, tighten the RSI zone and increase sector/leader counts slightly.")
-
     st.write("### 📌 Watchlist Write-ups (click to expand)")
-    for info in wdf.head(20).to_dict("records"):
-        # Rebuild full info object for writeup (includes explanation + STRAT notes)
-        full = analyze_ticker(info["Ticker"], spy, int(rs_short), int(rs_long), int(ema_trend_len), int(rsi_len))
+    for rec in wdf.head(20).to_dict("records"):
+        full = analyze_ticker(rec["Ticker"], spy, int(rs_short), int(rs_long), int(ema_trend_len), int(rsi_len))
         if full is None:
             continue
-        full["Group"] = info["Group"]
-
+        full["Group"] = rec["Group"]
         with st.expander(f"{full['Group']} — {full['Ticker']} | {full['Meter']} {full['Strength']}/100 | {full['TriggerStatus']}"):
             writeup_block(full, pb_low, pb_high)
 
-    # =========================
-    # QUICK TICKER SEARCH (inline)
-    # =========================
+    # Quick ticker search inline
     st.subheader("🔎 Quick Ticker Search (Why is this a candidate?)")
-    cA, cB = st.columns([1.2, 3])
-    with cA:
-        q = st.text_input("Type a ticker:", value="AAPL")
-    with cB:
-        st.caption("Shows Trend, RSI, RS vs SPY, Rotation, Strength score, and STRAT trigger context.")
-
+    q = st.text_input("Type a ticker:", value="AAPL")
     if q:
         info = analyze_ticker(q.strip().upper(), spy, int(rs_short), int(rs_long), int(ema_trend_len), int(rsi_len))
         if info is None:
-            st.warning("No data returned (bad ticker or yfinance returned empty). Try another symbol.")
+            st.warning("No data returned (bad ticker or yfinance empty). Try another symbol.")
         else:
             writeup_block(info, pb_low, pb_high)
 
 def show_ticker_analyzer():
-    st.title("🔎 Ticker Analyzer — Explain the Score + STRAT Context (V1.2)")
-    st.caption("Type any ticker and see exactly why it scores, plus Inside Bar trigger levels if present.")
+    st.title("🔎 Ticker Analyzer — Explain the Score + STRAT Context (V1.2.1)")
+    st.caption("Type any ticker and see: Trend, RSI, RS vs SPY, Rotation, Strength score, and STRAT triggers.")
 
     with st.expander("Analyzer Settings", expanded=True):
         c1, c2, c3, c4, c5 = st.columns([1.1, 1.1, 1.1, 1.1, 1.2])
         with c1:
             ticker = st.text_input("Ticker", value="AAPL")
         with c2:
-            rs_short = st.selectbox("RS Lookback (short)", [21, 30, 42], index=0)
+            rs_short = st.selectbox("RS Lookback (short)", [21, 30, 42], index=0, key="ta_rs_s")
         with c3:
-            rs_long = st.selectbox("RS Lookback (long)", [63, 90, 126], index=0)
+            rs_long = st.selectbox("RS Lookback (long)", [63, 90, 126], index=0, key="ta_rs_l")
         with c4:
-            ema_trend_len = st.selectbox("Trend EMA", [50, 100, 200], index=0)
+            ema_trend_len = st.selectbox("Trend EMA", [50, 100, 200], index=0, key="ta_ema")
         with c5:
-            rsi_len = st.selectbox("RSI Length", [7, 14, 21], index=1)
+            rsi_len = st.selectbox("RSI Length", [7, 14, 21], index=1, key="ta_rsi")
 
     pb1, pb2 = st.columns(2)
     with pb1:
-        pb_low = st.slider("RSI Pullback Low (UP trend)", 25, 60, 40)
+        pb_low = st.slider("RSI Pullback Low (UP trend)", 25, 60, 40, key="ta_pb_low")
     with pb2:
-        pb_high = st.slider("RSI Pullback High (UP trend)", 35, 75, 55)
+        pb_high = st.slider("RSI Pullback High (UP trend)", 35, 75, 55, key="ta_pb_high")
 
     spy_df = get_hist("SPY")
     if spy_df.empty:
         st.warning("SPY data unavailable; cannot compute RS vs SPY.")
         return
+
     spy = spy_df["Close"].dropna()
     if len(spy) < (rs_long + 10):
         st.warning("Not enough SPY history for these lookbacks.")
@@ -815,14 +969,240 @@ def show_ticker_analyzer():
         else:
             writeup_block(info, pb_low, pb_high)
 
-# =========================
-# SCANNER (kept simple placeholder)
-# =========================
 def show_scanner():
-    st.title("STRAT Regime Scanner — V1.2")
-    st.info("Scanner page kept as-is from your working build. If you want, I can merge your full V1.1.1 scanner logic back into this V1.2 file next.")
+    st.title("STRAT Regime Scanner (Auto LONG/SHORT + Magnitude) — V1.2.1")
+    st.caption("Bias from market regime. Ranks tickers by setup quality AND magnitude (RR + ATR% + compression).")
 
-    st.write("If you want the scanner fully restored inside this V1.2 file, say: **merge scanner**.")
+    with st.expander("Filters", expanded=True):
+        colA, colB, colC, colD = st.columns([1.1, 1.2, 1.6, 1.1])
+
+        with colA:
+            only_inside = st.checkbox("ONLY Inside Bars (D or W)", value=False)
+        with colB:
+            only_212 = st.checkbox("ONLY 2-1-2 forming (bias direction)", value=False)
+        with colC:
+            require_alignment = st.checkbox("Require Monthly OR Weekly alignment (bias direction)", value=True)
+        with colD:
+            top_k = st.slider("Top Picks count", min_value=3, max_value=8, value=5)
+
+        colR1, colR2 = st.columns([1, 3])
+        with colR1:
+            if st.button("Refresh data"):
+                st.cache_data.clear()
+                st.rerun()
+
+    st.caption(f"Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+
+    # =========================
+    # BUILD MARKET REGIME
+    # =========================
+    market_rows: List[Dict] = []
+    for name, etf in MARKET_ETFS.items():
+        d = get_hist(etf)
+        if d.empty:
+            flags = {k: False for k in [
+                "D_Bull","W_Bull","M_Bull","D_Bear","W_Bear","M_Bear",
+                "D_Inside","W_Inside","M_Inside","D_212Up","W_212Up","D_212Dn","W_212Dn"
+            ]}
+            bull, bear = 0, 0
+        else:
+            d_tf, w_tf, m_tf = tf_frames(d)
+            flags = compute_flags(d_tf, w_tf, m_tf)
+            bull, bear = score_regime(flags)
+
+        row = {"Market": name, "ETF": etf, "BullScore": bull, "BearScore": bear}
+        row.update(flags)
+        market_rows.append(row)
+
+    bias, strength, bull_bear_diff = market_bias_and_strength(market_rows)
+
+    st.subheader("Market Regime (SPY / QQQ / IWM / DIA) — Bull vs Bear")
+    market_df = pd.DataFrame(market_rows)[[
+        "Market","ETF",
+        "D_Bull","W_Bull","M_Bull",
+        "D_Bear","W_Bear","M_Bear",
+        "D_212Up","W_212Up","D_212Dn","W_212Dn"
+    ]]
+    st.dataframe(market_df, use_container_width=True, hide_index=True)
+
+    # =========================
+    # BUILD SECTOR/METALS TABLE
+    # =========================
+    sector_rows: List[Dict] = []
+    for sector, etf in SECTOR_ETFS.items():
+        d = get_hist(etf)
+        if d.empty:
+            flags = {k: False for k in [
+                "D_Bull","W_Bull","M_Bull","D_Bear","W_Bear","M_Bear",
+                "D_Inside","W_Inside","M_Inside","D_212Up","W_212Up","D_212Dn","W_212Dn"
+            ]}
+            bull, bear = 0, 0
+        else:
+            d_tf, w_tf, m_tf = tf_frames(d)
+            flags = compute_flags(d_tf, w_tf, m_tf)
+            bull, bear = score_regime(flags)
+
+        row = {"Sector": sector, "ETF": etf, "BullScore": bull, "BearScore": bear}
+        row.update(flags)
+        sector_rows.append(row)
+
+    sectors_df = pd.DataFrame(sector_rows)
+
+    if bias == "LONG":
+        sectors_df = sectors_df.sort_values(["BullScore","BearScore"], ascending=[False, True])
+    elif bias == "SHORT":
+        sectors_df = sectors_df.sort_values(["BearScore","BullScore"], ascending=[False, True])
+    else:
+        sectors_df["Dominance"] = (sectors_df["BullScore"] - sectors_df["BearScore"]).abs()
+        sectors_df = sectors_df.sort_values("Dominance", ascending=False)
+
+    st.subheader("Sectors + Metals — ranked after bias is known")
+    st.dataframe(
+        sectors_df[[
+            "Sector","ETF","BullScore","BearScore",
+            "D_Bull","W_Bull","M_Bull","D_Bear","W_Bear","M_Bear",
+            "D_Inside","W_Inside","M_Inside",
+            "D_212Up","W_212Up","D_212Dn","W_212Dn"
+        ]],
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # =========================
+    # DRILLDOWN: TOP NAMES
+    # =========================
+    st.subheader("Drill into a group (ranks candidates in bias direction + magnitude)")
+
+    sector_choice = st.selectbox("Choose a sector/metals group:", options=list(SECTOR_TICKERS.keys()), index=0)
+    tickers = SECTOR_TICKERS.get(sector_choice, [])
+    st.write(f"Selected: **{sector_choice}** ({SECTOR_ETFS.get(sector_choice,'')}) — tickers in list: **{len(tickers)}**")
+
+    scan_n = st.slider("How many tickers to scan", min_value=1, max_value=len(tickers), value=min(15, len(tickers)))
+    scan_list = tickers[:scan_n]
+
+    cand_rows: List[Dict] = []
+    for t in scan_list:
+        d = get_hist(t)
+        if d.empty:
+            continue
+
+        d_tf, w_tf, m_tf = tf_frames(d)
+        flags = compute_flags(d_tf, w_tf, m_tf)
+
+        if require_alignment and bias in ("LONG","SHORT") and not alignment_ok(bias, flags):
+            continue
+
+        if only_inside and not (flags["D_Inside"] or flags["W_Inside"]):
+            continue
+
+        if only_212:
+            if bias == "LONG" and not (flags["D_212Up"] or flags["W_212Up"]):
+                continue
+            if bias == "SHORT" and not (flags["D_212Dn"] or flags["W_212Dn"]):
+                continue
+
+        eff_bias = bias if bias in ("LONG","SHORT") else "LONG"
+
+        tf, entry, stop = best_trigger(eff_bias, d_tf, w_tf)
+        rr, atrp, room, compression = magnitude_metrics(eff_bias, d_tf, entry, stop)
+        setup_score, mag_score, total_score = calc_scores(eff_bias, flags, rr, atrp, compression, entry, stop)
+
+        trigger_status = "READY" if (flags["W_Inside"] or flags["D_Inside"]) else "WAIT (No Inside Bar)"
+
+        cand = {
+            "Ticker": t,
+            "TriggerStatus": trigger_status,
+            "SetupScore": setup_score,
+            "MagScore": mag_score,
+            "TotalScore": total_score,
+            "TF": tf,
+            "Entry": None if entry is None else round(float(entry), 2),
+            "Stop": None if stop is None else round(float(stop), 2),
+            "Room": None if room is None else round(float(room), 2),
+            "RR": None if rr is None else round(float(rr), 2),
+            "ATR%": None if atrp is None else round(float(atrp), 2),
+        }
+        cand.update(flags)
+        cand_rows.append(cand)
+
+    cand_df = pd.DataFrame(cand_rows)
+    if cand_df.empty:
+        st.info("No matches under current filters. Loosen filters (or market is in drift/chop).")
+    else:
+        cand_df = cand_df.sort_values("TotalScore", ascending=False)
+
+        st.markdown(f"### Top Trade Ideas (best {top_k}) — Bias: **{bias}** (ranked by TotalScore)")
+        top_df = cand_df.head(top_k)[[
+            "Ticker","TriggerStatus","TotalScore","SetupScore","MagScore","TF","Entry","Stop","Room","RR","ATR%",
+            "W_212Up","D_212Up","M_Bull","W_Bull","D_Bull","W_Inside","D_Inside",
+            "W_212Dn","D_212Dn","M_Bear","W_Bear","D_Bear"
+        ]]
+        st.dataframe(top_df, use_container_width=True, hide_index=True)
+
+        st.markdown("### 🎯 Trade of the Day (best TotalScore + valid trigger)")
+        valid = cand_df.dropna(subset=["Entry","Stop","RR"]).copy()
+        valid = valid[valid["RR"] >= 2.0]
+        if valid.empty:
+            st.warning("No valid trigger found (needs Inside Bar levels). Use Top Ideas and wait for an Inside Bar trigger.")
+        else:
+            best = valid.iloc[0]
+            st.success(
+                f"**{best['Ticker']}** | Bias: **{bias}** | TF: **{best['TF']}** | "
+                f"Entry: **{best['Entry']}** | Stop: **{best['Stop']}** | "
+                f"RR: **{best['RR']}** | ATR%: **{best['ATR%']}**"
+            )
+
+        st.markdown("### All Matches (ranked by TotalScore)")
+        st.dataframe(
+            cand_df[[
+                "Ticker","TriggerStatus","SetupScore","MagScore","TotalScore","TF","Entry","Stop","Room","RR","ATR%",
+                "W_Inside","D_Inside","W_212Up","D_212Up","W_212Dn","D_212Dn",
+                "M_Bull","W_Bull","D_Bull","M_Bear","W_Bear","D_Bear"
+            ]],
+            use_container_width=True,
+            hide_index=True
+        )
+
+    # =========================
+    # QUICK MARKET READ (Rotation IN + Rotation OUT)
+    # =========================
+    st.subheader("Quick Market Read")
+
+    if bias in ("LONG", "SHORT"):
+        rotation_in = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.head(3).iterrows()]
+        rotation_out = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.tail(3).iterrows()]
+    else:
+        rotation_in, rotation_out = [], []
+
+    if bias == "MIXED" or strength < 50:
+        plan = "Plan: Defensive. Trade smaller, or wait for A+ triggers."
+        badge = "🟠"
+    elif bias == "LONG":
+        plan = "Plan: LONG only. Focus strong groups with triggers."
+        badge = "🟢"
+    else:
+        plan = "Plan: SHORT only. Focus weak groups with triggers."
+        badge = "🔴"
+
+    st.write(
+        f"Bias: **{bias}** {badge} | "
+        f"Strength: **{strength}/100** | "
+        f"Bull–Bear diff: **{bull_bear_diff}**"
+    )
+
+    if rotation_in:
+        st.write("### Rotation IN")
+        st.write(", ".join(rotation_in))
+
+    if rotation_out:
+        st.write("### Rotation OUT")
+        st.write(", ".join(rotation_out))
+
+    st.success(plan)
+    st.caption(
+        "Trigger logic: LONG = break of Inside Bar high / stop below low. "
+        "SHORT = break of Inside Bar low / stop above high. Weekly triggers preferred."
+    )
 
 # =========================
 # SIDEBAR NAV
@@ -835,7 +1215,6 @@ if show_market_dash:
     pages.insert(1, "📊 Market Dashboard")
 
 page = st.sidebar.radio("Go to", pages)
-
 st.sidebar.caption(f"Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
 
 # =========================
