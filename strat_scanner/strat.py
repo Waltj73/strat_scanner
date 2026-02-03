@@ -1,93 +1,63 @@
 # strat_scanner/strat.py
-# STRAT logic helpers (no streamlit imports)
+# STRAT trigger logic (safe + compatible)
 
 from __future__ import annotations
-
 from typing import Optional
 import pandas as pd
 
 
-def _has_ohlc(df: pd.DataFrame) -> bool:
-    if df is None or df.empty:
-        return False
-    cols = set(df.columns)
-    return {"Open", "High", "Low", "Close"}.issubset(cols)
-
-
-def _bar_type(df: pd.DataFrame) -> str:
-    """
-    Classify the most recent bar relative to the previous bar using High/Low.
-    Returns one of: "1" (inside), "2U", "2D", "3" (outside), "NA"
-    """
-    if not _has_ohlc(df):
-        return "NA"
-
-    h = df["High"].dropna()
-    l = df["Low"].dropna()
-    if len(h) < 2 or len(l) < 2:
-        return "NA"
-
-    prev_high, prev_low = float(h.iloc[-2]), float(l.iloc[-2])
-    last_high, last_low = float(h.iloc[-1]), float(l.iloc[-1])
-
-    inside = (last_high <= prev_high) and (last_low >= prev_low)
-    outside = (last_high > prev_high) and (last_low < prev_low)
-    two_up = (last_high > prev_high) and (last_low >= prev_low)
-    two_dn = (last_low < prev_low) and (last_high <= prev_high)
-
-    if inside:
-        return "1"
-    if outside:
-        return "3"
-    if two_up:
-        return "2U"
-    if two_dn:
-        return "2D"
-    return "NA"
-
-
 def best_trigger(df: pd.DataFrame, direction: Optional[str] = None) -> str:
     """
-    Safe, compatible trigger function.
+    Compatible with engine.py calls like:
+        best_trigger(df, direction=direction)
 
-    ✅ Compatible with: best_trigger(df, direction=direction)
-    ✅ df must be a DataFrame with OHLC (recommended).
-    ✅ direction can be: "LONG", "SHORT", or None.
+    Requires OHLC. If missing, returns a safe WAIT string (never crashes).
     """
+
     if df is None or df.empty:
         return "WAIT (No Data)"
-    if not _has_ohlc(df):
-        # Don't crash. Just return a stable label.
+
+    # Must have OHLC
+    required = {"Open", "High", "Low", "Close"}
+    if not required.issubset(set(df.columns)):
         return "WAIT (Missing OHLC)"
 
-    bt = _bar_type(df)
+    # Normalize direction
     d = (direction or "").upper()
     if d not in ("LONG", "SHORT"):
         d = "NONE"
 
-    # Inside bar logic: wait for break in direction
-    if bt == "1":
+    # Need at least 2 bars
+    if len(df) < 2:
+        return "WAIT (Not Enough Bars)"
+
+    prev = df.iloc[-2]
+    cur = df.iloc[-1]
+
+    prev_high, prev_low = float(prev["High"]), float(prev["Low"])
+    cur_high, cur_low = float(cur["High"]), float(cur["Low"])
+
+    # STRAT bar types
+    inside = (cur_high <= prev_high) and (cur_low >= prev_low)     # 1
+    outside = (cur_high > prev_high) and (cur_low < prev_low)      # 3
+    two_up = (cur_high > prev_high) and (cur_low >= prev_low)      # 2U
+    two_dn = (cur_low < prev_low) and (cur_high <= prev_high)      # 2D
+
+    if inside:
         if d == "LONG":
             return "WAIT (Inside Bar) — break HIGH"
         if d == "SHORT":
             return "WAIT (Inside Bar) — break LOW"
         return "WAIT (Inside Bar)"
 
-    # Outside bars are messy; require confirmation
-    if bt == "3":
+    if outside:
         return "WAIT (Outside Bar) — confirm"
 
-    # Directional bar types
-    if bt == "2U":
+    if two_up:
         return "READY (2U)"
-    if bt == "2D":
+
+    if two_dn:
         return "READY (2D)"
 
-    # Fallback momentum read on Close (never crashes)
-    c = df["Close"].dropna()
-    if len(c) >= 3 and (c.iloc[-1] > c.iloc[-2] > c.iloc[-3]):
-        return "READY (Momentum Up)"
-    if len(c) >= 3 and (c.iloc[-1] < c.iloc[-2] < c.iloc[-3]):
-        return "READY (Momentum Down)"
-
+    # Fallback (should rarely hit)
     return "WAIT"
