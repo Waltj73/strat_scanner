@@ -1,36 +1,62 @@
+# strat_scanner/strat.py
+# STRAT trigger logic (NO streamlit)
+
+from __future__ import annotations
+from typing import Dict, Optional, Union
+
 import pandas as pd
 
-def best_trigger(df: pd.DataFrame) -> str:
+
+def _inside_bar(cur: pd.Series, prev: pd.Series) -> bool:
+    return (cur["High"] <= prev["High"]) and (cur["Low"] >= prev["Low"])
+
+
+def best_trigger(df: pd.DataFrame, direction: str = "LONG") -> Union[str, Dict]:
     """
-    Simple STRAT candle logic (core engine)
+    STRAT trigger:
+    - If Weekly Inside Bar exists: use that (preferred)
+    - Else if Daily Inside Bar exists: use that
+    Returns either:
+      - dict: {"Status","TF","Entry","Stop"}
+      - or a WAIT string
     """
-    if df is None or df.empty or len(df) < 3:
-        return "WAIT"
+    if df is None or df.empty or len(df) < 5:
+        return "WAIT (No Data)"
 
-    h = df["High"]
-    l = df["Low"]
+    for col in ("Open", "High", "Low", "Close"):
+        if col not in df.columns:
+            return "WAIT (Missing OHLC)"
 
-    def candle(i):
-        if h.iloc[i] > h.iloc[i-1] and l.iloc[i] < l.iloc[i-1]:
-            return "3"
-        if h.iloc[i] > h.iloc[i-1] and l.iloc[i] >= l.iloc[i-1]:
-            return "2U"
-        if h.iloc[i] <= h.iloc[i-1] and l.iloc[i] < l.iloc[i-1]:
-            return "2D"
-        return "1"
+    d = df.dropna(subset=["High", "Low", "Close"]).copy()
+    if len(d) < 3:
+        return "WAIT (No Data)"
 
-    c1 = candle(-3)
-    c2 = candle(-2)
-    c3 = candle(-1)
+    # Weekly bars
+    w = d.resample("W-FRI").agg(
+        Open=("Open", "first"),
+        High=("High", "max"),
+        Low=("Low", "min"),
+        Close=("Close", "last"),
+    ).dropna()
 
-    if c1 == "1" and c2 == "2U":
-        return "1-2 Break (Long)"
-    if c1 == "1" and c2 == "2D":
-        return "1-2 Break (Short)"
+    # 1) Weekly Inside Bar
+    if len(w) >= 2:
+        cur, prev = w.iloc[-1], w.iloc[-2]
+        if _inside_bar(cur, prev):
+            hi = float(cur["High"])
+            lo = float(cur["Low"])
+            if direction.upper() == "SHORT":
+                return {"Status": "READY", "TF": "W", "Entry": lo, "Stop": hi}
+            return {"Status": "READY", "TF": "W", "Entry": hi, "Stop": lo}
 
-    if c2 == "2U" and c3 == "2U":
-        return "2-2 Continuation (Long)"
-    if c2 == "2D" and c3 == "2D":
-        return "2-2 Continuation (Short)"
+    # 2) Daily Inside Bar
+    if len(d) >= 2:
+        cur, prev = d.iloc[-1], d.iloc[-2]
+        if _inside_bar(cur, prev):
+            hi = float(cur["High"])
+            lo = float(cur["Low"])
+            if direction.upper() == "SHORT":
+                return {"Status": "READY", "TF": "D", "Entry": lo, "Stop": hi}
+            return {"Status": "READY", "TF": "D", "Entry": hi, "Stop": lo}
 
-    return f"{c1}-{c2}-{c3}"
+    return "WAIT (No Inside Bar)"
