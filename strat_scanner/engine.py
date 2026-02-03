@@ -34,6 +34,7 @@ def analyze_ticker(
         return None
 
     close = df["Close"].dropna()
+    tr = trend_label(close, int(ema_trend_len))
     if len(close) < (rs_long + 10) or len(spy_close) < (rs_long + 10):
         return None
 
