@@ -1,5 +1,7 @@
 # pages/scanner.py — STRAT Scanner page (regime + sector ranking + drilldown)
 # This file is UI only. All logic lives in strat.py / engine.py / indicators.py / data.py
+def show_scanner():
+    # scanner code here
 
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
