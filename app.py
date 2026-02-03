@@ -698,10 +698,10 @@ def writeup_block(info: Dict, pb_low: float, pb_high: float) -> None:
 # =========================
 # USER GUIDE (DETAILED)
 # =========================
-def show_user_guide():
-    st.title(f"📘 STRAT Regime Scanner — Complete User Guide (v{APP_VERSION})")
-
-    st.markdown("""
+# =========================
+# USER GUIDE (DETAILED) — FIXED
+# =========================
+GUIDE_MD = r"""
 ## Welcome — What This Tool Is Designed To Do
 
 The STRAT Regime Scanner is designed to turn the market into a simple decision pipeline.
@@ -720,7 +720,7 @@ When you follow that order, you naturally trade with the “wind at your back.�
 ## The Four Sections of the App
 
 ### 1) Market Dashboard
-The Dashboard answers: **“Where is money flowing right now?”**
+The Dashboard answers: **Where is money flowing right now?**
 
 Instead of hunting random charts, you first identify the *best areas* of the market.
 
@@ -736,6 +736,154 @@ The Dashboard is an **attention filter**.
 It tells you where to focus.
 
 ---
+
+### 2) Today Watchlist
+The Watchlist is your daily short list.
+
+It works like this:
+1) Select the **top sectors rotating IN**
+2) For each sector, it picks **the strongest leaders**
+3) Optionally filters by **pullback quality**
+4) Shows **trigger status** (READY vs WAIT)
+5) Provides a complete **trade-plan write-up**
+
+This is your “do not overthink it” list.
+
+---
+
+### 3) STRAT Scanner
+The Scanner answers: **What is actionable right now?**
+
+This is your execution engine:
+- It builds overall market bias (LONG / SHORT / MIXED)
+- It ranks sectors based on that bias
+- It drills into a sector and ranks names by setup + magnitude
+- It prints Entry/Stop/RR when an Inside Bar is present
+
+If Entry/Stop are blank, that is not a bug.
+That means: **no trigger yet → wait.**
+
+---
+
+### 4) Ticker Analyzer
+The Analyzer answers: **Why does this score the way it does?**
+
+Type any ticker and it will show:
+- Trend condition
+- RSI state
+- Relative strength vs SPY
+- Rotation improvement/deterioration
+- STRAT context + triggers
+- Trade-plan notes
+
+This is where you sanity-check a candidate.
+
+---
+
+## Strength Meter (0–100)
+
+Strength is a blended score that weights:
+- Relative strength vs SPY (short lookback)
+- Rotation (RS short minus RS long)
+- Trend (price vs EMA + EMA slope)
+
+Why cap values?
+Because extreme moves distort scoring.
+Capping keeps it stable and tradable.
+
+Interpretation:
+- **70–100** = Strong leadership (best follow-through)
+- **45–69** = Neutral (mixed conditions)
+- **0–44** = Weak (avoid for longs)
+
+---
+
+## Rotation (What “Rotation IN/OUT” Means)
+
+Rotation measures whether leadership is **improving right now**.
+
+We compute:
+**Rotation = RS(short) − RS(long)**
+
+- Positive rotation → money flowing into the name/sector
+- Negative rotation → money flowing out
+
+Rotation tells you who is *becoming* strong.
+
+---
+
+## RSI Pullback Zone (Continuation Entries)
+
+Most quality swing entries happen on pullbacks inside a trend.
+
+This tool uses a pullback zone for uptrends:
+**RSI between 40 and 55** (default)
+
+Meaning:
+- Trend still intact
+- Momentum cooled
+- Continuation becomes likely
+
+If RSI is above the zone, it may be extended.
+If RSI is below, it may be breaking.
+
+---
+
+## STRAT Trigger Logic (How Entries Work)
+
+When an Inside Bar exists, the tool prints actionable levels.
+
+**LONG**
+- Entry = break of Inside Bar high
+- Stop = below Inside Bar low
+
+**SHORT**
+- Entry = break of Inside Bar low
+- Stop = above Inside Bar high
+
+Weekly triggers matter more than daily.
+Daily triggers are fine if the name is already a leader.
+
+---
+
+## Recommended Daily Workflow (2–5 minutes)
+
+1) Go to **Market Dashboard**
+   - Note market trend + VIX behavior
+   - Identify the top sectors rotating IN
+
+2) Go to **Today Watchlist**
+   - Review only the strongest leaders
+   - Expand write-ups for A/B candidates
+   - Mark names that are READY or close to READY
+
+3) Go to **Scanner** (execution)
+   - Drill into your chosen sector
+   - Only act on names with real triggers
+   - Place stop orders and walk away
+
+Goal:
+**Let the trigger take you in.**
+No trigger = no trade.
+
+---
+
+## When Dashboard and Scanner Disagree
+
+This happens when:
+- A sector is improving (dashboard)
+- But triggers aren’t printed yet (scanner)
+
+That’s normal.
+
+Dashboard controls **focus**.  
+Scanner controls **entries**.
+"""
+
+def show_user_guide():
+    st.title(f"📘 STRAT Regime Scanner — Complete User Guide (v{APP_VERSION})")
+    st.markdown(GUIDE_MD)
+
 
 ### 2) Today Watchlist
 The Watchlist is your daily short list.
