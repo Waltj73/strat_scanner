@@ -14,11 +14,11 @@ from strat_scanner.indicators import (
     total_return,
     rs_vs_spy,
     trend_label,
-    clamp,
     clamp_rs,
     strength_meter,
     strength_label,
 )
+
 from strat_scanner.strat import best_trigger
 from strat_scanner.engine import analyze_ticker, writeup_block
 
