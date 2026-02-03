@@ -1,103 +1,118 @@
-# strat_scanner/engine.py
+# strat_scanner/engine.py — magnitude scoring (RR / ATR% / compression)
+
 from __future__ import annotations
-from typing import Optional, Dict
+import math
+from typing import Dict, Optional, Tuple
 
 import pandas as pd
+from strat_scanner.strat import strat_inside
 
-from strat_scanner.data import get_hist
-from strat_scanner.indicators import (
-    rsi_wilder,
-    rs_vs_spy,
-    trend_label,
-    strength_meter,
-    strength_label,
-)
-from strat_scanner.strat import strat_signal
+def atr14(df: pd.DataFrame) -> float:
+    if df is None or df.empty or len(df) < 20:
+        return float("nan")
+    h, l, c = df["High"], df["Low"], df["Close"]
+    prev_c = c.shift(1)
+    tr = pd.concat([(h - l).abs(), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    return float(tr.rolling(14).mean().iloc[-1])
 
+def magnitude_metrics(
+    bias: str,
+    d: pd.DataFrame,
+    entry: Optional[float],
+    stop: Optional[float]
+) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    if d is None or d.empty or len(d) < 80:
+        return None, None, None, None
 
-def analyze_ticker(
-    ticker: str,
-    spy_close: pd.Series,
-    rs_short: int,
-    rs_long: int,
-    ema_trend_len: int,
-    rsi_len: int,
-) -> Optional[Dict]:
-    df = get_hist(ticker)
-    if df is None or df.empty:
-        return None
+    close = float(d["Close"].iloc[-1])
+    atr = atr14(d)
+    if not math.isfinite(atr) or atr <= 0:
+        return None, None, None, None
 
-    # Ensure required columns exist
-    if "Close" not in df.columns:
-        return None
+    atrp = (atr / close) * 100.0
 
-    close = df["Close"].dropna()
-    if close.empty:
-        return None
+    if entry is None or stop is None:
+        return None, atrp, None, None
 
-    # Need enough history for RS lookbacks
-    if len(close) < (rs_long + 10) or len(spy_close) < (rs_long + 10):
-        return None
+    hi63 = float(d["High"].rolling(63).max().iloc[-1])
+    lo63 = float(d["Low"].rolling(63).min().iloc[-1])
 
-    # Core metrics
-    rs_s = float(rs_vs_spy(close, spy_close, int(rs_short)).iloc[-1])
-    rs_l = float(rs_vs_spy(close, spy_close, int(rs_long)).iloc[-1])
-    rot = rs_s - rs_l
-
-    tr = trend_label(close, int(ema_trend_len))
-    rsi = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
-
-    strength = int(strength_meter(rs_s, rot, tr))
-    meter = strength_label(strength)
-
-    # Direction bias for STRAT messaging
-    direction = "LONG" if tr == "UP" else "SHORT"
-
-    # STRAT info (uses OHLC)
-    s = strat_signal(df, direction=direction)
-
-    # Simple entry/stop scaffolding
-    entry = float(close.iloc[-1])
-    stop = float(df["Low"].rolling(20).min().iloc[-1]) if "Low" in df.columns and len(df) >= 20 else float(close.min())
-
-    return {
-        "Ticker": ticker.upper(),
-        "Strength": strength,
-        "Meter": meter,
-        "Trend": tr,
-        "RSI": rsi,
-        "RS_short": rs_s,
-        "RS_long": rs_l,
-        "Rotation": rot,
-
-        # STRAT fields (this is what you’re missing)
-        "StratBar": s.bar,
-        "TriggerStatus": f"{s.trigger} | Bar: {s.bar}",
-
-        # Existing fields expected by pages
-        "TF": "D",
-        "Entry": entry,
-        "Stop": stop,
-    }
-
-
-def writeup_block(info: Dict, pb_low: float, pb_high: float):
-    import streamlit as st
-
-    st.markdown(f"### {info['Ticker']} — {info['Meter']} ({info['Strength']}/100)")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Trend", info["Trend"])
-    c2.metric("RSI", f"{info['RSI']:.1f}")
-    c3.metric("RS short", f"{info['RS_short']:.2%}")
-    c4.metric("Rotation", f"{info['Rotation']:.2%}")
-
-    # STRAT line
-    st.write(f"STRAT: **{info.get('TriggerStatus','n/a')}**")
-
-    st.write(f"Entry (guide): **{info['Entry']:.2f}**")
-    st.write(f"Stop (guide): **{info['Stop']:.2f}**")
-
-    if info["Trend"] == "UP" and (pb_low <= info["RSI"] <= pb_high):
-        st.success(f"Pullback zone OK (RSI between {pb_low}–{pb_high})")
+    if bias == "LONG":
+        target = hi63
+        risk = entry - stop
+        reward = target - entry
+        room = max(0.0, target - entry)
     else:
-        st.info("Pullback zone not confirmed (or trend not UP).")
+        target = lo63
+        risk = stop - entry
+        reward = entry - target
+        room = max(0.0, entry - target)
+
+    rr = None if risk <= 0 else (reward / risk if reward > 0 else 0.0)
+
+    compression = None
+    if strat_inside(d) and len(d) >= 2:
+        cur = d.iloc[-1]
+        rng = float(cur["High"] - cur["Low"])
+        compression = rng / atr if atr > 0 else None
+
+    return rr, atrp, room, compression
+
+def calc_scores(
+    bias: str,
+    flags: Dict[str, bool],
+    rr: Optional[float],
+    atrp: Optional[float],
+    compression: Optional[float],
+    entry: Optional[float],
+    stop: Optional[float],
+) -> Tuple[int, int, int]:
+    setup = 0
+    mag = 0
+
+    if bias == "LONG":
+        setup += 30 if flags["M_Bull"] else 0
+        setup += 20 if flags["W_Bull"] else 0
+        setup += 10 if flags["D_Bull"] else 0
+        setup += 20 if flags["W_212Up"] else 0
+        setup += 10 if flags["D_212Up"] else 0
+    elif bias == "SHORT":
+        setup += 30 if flags["M_Bear"] else 0
+        setup += 20 if flags["W_Bear"] else 0
+        setup += 10 if flags["D_Bear"] else 0
+        setup += 20 if flags["W_212Dn"] else 0
+        setup += 10 if flags["D_212Dn"] else 0
+
+    setup += 10 if flags["W_Inside"] else 0
+    setup += 5 if flags["D_Inside"] else 0
+
+    if rr is not None:
+        if rr >= 3:
+            mag += 35
+        elif rr >= 2:
+            mag += 25
+        elif rr >= 1.5:
+            mag += 10
+
+    if atrp is not None:
+        if atrp >= 3:
+            mag += 20
+        elif atrp >= 2:
+            mag += 10
+        elif atrp >= 1:
+            mag += 5
+
+    if compression is not None:
+        if compression <= 0.6:
+            mag += 15
+        elif compression <= 0.9:
+            mag += 8
+        elif compression <= 1.2:
+            mag += 3
+
+    if entry is not None and stop is not None:
+        mag += 5
+
+    total = setup + mag
+    return setup, mag, total
+
