@@ -1,6 +1,8 @@
 import streamlit as st
 from strat_scanner.data import get_hist
-from strat_scanner.engine import analyze_ticker, writeup_block
+from strat_scanner.engine import analyze_ticker
+from strat_scanner.ui import writeup_block
+
 
 def show_analyzer():
     st.title("🔎 Ticker Analyzer")
