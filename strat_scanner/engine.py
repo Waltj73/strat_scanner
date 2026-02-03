@@ -28,7 +28,6 @@ def analyze_ticker(
     if df is None or df.empty:
         return None
 
-    # Ensure expected columns exist
     if "Close" not in df.columns:
         return None
 
@@ -49,10 +48,9 @@ def analyze_ticker(
     strength = int(strength_meter(rs_s, rot, tr))
     meter = strength_label(strength)
 
-    # STRAT trigger (safe)
+    # IMPORTANT: best_trigger expects a DataFrame (OHLC)
     trigger = best_trigger(df, direction=direction)
 
-    # entry/stop placeholders (stable, avoids overpromising)
     entry = float(close.iloc[-1])
     stop = float(close.rolling(20).min().iloc[-1]) if len(close) >= 20 else float(close.min())
 
@@ -87,6 +85,6 @@ def writeup_block(info: Dict, pb_low: float, pb_high: float):
     st.write(f"Stop (guide): **{info['Stop']:.2f}**")
 
     if info["Trend"] == "UP" and (pb_low <= info["RSI"] <= pb_high):
-        st.success(f"Pullback zone OK (RSI between {pb_low}–{pb_high})")
+        st.success(f"Pullback zone OK (RSI {pb_low}–{pb_high})")
     else:
         st.info("Pullback zone not confirmed (or trend not UP).")
