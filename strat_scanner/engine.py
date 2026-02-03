@@ -1,7 +1,6 @@
 from __future__ import annotations
 from typing import Optional, Dict
 
-import numpy as np
 import pandas as pd
 
 from strat_scanner.data import get_hist
@@ -14,6 +13,7 @@ from strat_scanner.indicators import (
 )
 from strat_scanner.strat import best_trigger
 
+
 def analyze_ticker(
     ticker: str,
     spy_close: pd.Series,
@@ -22,61 +22,44 @@ def analyze_ticker(
     ema_trend_len: int,
     rsi_len: int,
 ) -> Optional[Dict]:
+
     df = get_hist(ticker)
-    if df is None or df.empty or "Close" not in df.columns:
+    if df is None or df.empty:
+        return None
+
+    if "Close" not in df.columns:
         return None
 
     close = df["Close"].dropna()
-    if close.empty or len(close) < (rs_long + 10) or len(spy_close) < (rs_long + 10):
+    if len(close) < (rs_long + 10) or len(spy_close) < (rs_long + 10):
         return None
 
+    # --- Rotation / strength ---
     rs_s = float(rs_vs_spy(close, spy_close, int(rs_short)).iloc[-1])
     rs_l = float(rs_vs_spy(close, spy_close, int(rs_long)).iloc[-1])
     rot = rs_s - rs_l
 
-    tr = trend_label(close, int(ema_trend_len))
+    trend = trend_label(close, int(ema_trend_len))
     rsi = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
 
-    strength = int(strength_meter(rs_s, rot, tr))
+    strength = int(strength_meter(rs_s, rot, trend))
     meter = strength_label(strength)
 
-    # basic entry/stop scaffolding (stable, not over-promising)
-    entry = float(close.iloc[-1])
-    stop = float(close.rolling(20).min().iloc[-1]) if len(close) >= 20 else float(close.min())
+    # --- REAL Strat trigger ---
+    direction = "LONG" if trend == "UP" else "SHORT"
+    trigger = best_trigger(df, direction=direction)
 
     return {
         "Ticker": ticker.upper(),
         "Strength": strength,
         "Meter": meter,
-        "Trend": tr,
+        "Trend": trend,
         "RSI": rsi,
         "RS_short": rs_s,
         "RS_long": rs_l,
         "Rotation": rot,
-        "TriggerStatus": best_trigger(close),
-        "TF": "D",
-        "Entry": entry,
-        "Stop": stop,
+        "TriggerStatus": trigger.status,
+        "TF": trigger.tf,
+        "Entry": trigger.entry,
+        "Stop": trigger.stop,
     }
-
-def writeup_block(info: Dict, pb_low: float, pb_high: float):
-    """
-    Streamlit rendering helper used by pages (kept here so pages stay thin).
-    """
-    import streamlit as st
-
-    st.markdown(f"### {info['Ticker']} — {info['Meter']} ({info['Strength']}/100)")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Trend", info["Trend"])
-    c2.metric("RSI", f"{info['RSI']:.1f}")
-    c3.metric("RS short", f"{info['RS_short']:.2%}")
-    c4.metric("Rotation", f"{info['Rotation']:.2%}")
-
-    st.write(f"Trigger: **{info['TriggerStatus']}**  | TF: **{info['TF']}**")
-    st.write(f"Entry (guide): **{info['Entry']:.2f}**")
-    st.write(f"Stop (guide): **{info['Stop']:.2f}**")
-
-    if info["Trend"] == "UP" and (pb_low <= info["RSI"] <= pb_high):
-        st.success(f"Pullback zone OK (RSI between {pb_low}–{pb_high})")
-    else:
-        st.info("Pullback zone not confirmed (or trend not UP).")
