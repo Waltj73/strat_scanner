@@ -1,95 +1,228 @@
-from __future__ import annotations
+# engine.py — Scanner & analysis engine
+# Purpose:
+# - ticker analysis
+# - RR / magnitude calculations
+# - scoring logic
+# - writeup generation
 
-from typing import Optional, Dict
+import math
 import pandas as pd
 
-from strat_scanner.data import get_hist
-from strat_scanner.indicators import (
+from data import get_hist
+from indicators import (
     rsi_wilder,
-    rs_vs_spy,
+    atr14,
     trend_label,
     strength_meter,
-    strength_label,
 )
-from strat_scanner.strat import best_trigger, strat_bar_types
+from strat import (
+    tf_frames,
+    compute_flags,
+    best_trigger,
+)
 
 
-def analyze_ticker(
-    ticker: str,
-    spy_close: pd.Series,
-    rs_short: int,
-    rs_long: int,
-    ema_trend_len: int,
-    rsi_len: int,
-) -> Optional[Dict]:
-    df = get_hist(ticker)
-    if df is None or df.empty or "Close" not in df.columns:
+# =========================
+# MAGNITUDE / RR METRICS
+# =========================
+def magnitude_metrics(bias, d, entry, stop):
+    if d is None or d.empty or len(d) < 80:
+        return None, None, None, None
+
+    close = float(d["Close"].iloc[-1])
+    atr = atr14(d)
+
+    if not math.isfinite(atr) or atr <= 0:
+        return None, None, None, None
+
+    atrp = (atr / close) * 100
+
+    if entry is None or stop is None:
+        return None, atrp, None, None
+
+    hi63 = float(d["High"].rolling(63).max().iloc[-1])
+    lo63 = float(d["Low"].rolling(63).min().iloc[-1])
+
+    if bias == "LONG":
+        target = hi63
+        room = max(0.0, target - entry)
+        risk = entry - stop
+        reward = target - entry
+    else:
+        target = lo63
+        room = max(0.0, entry - target)
+        risk = stop - entry
+        reward = entry - target
+
+    rr = None if risk <= 0 else (reward / risk if reward > 0 else 0.0)
+
+    compression = None
+    if len(d) >= 2:
+        cur = d.iloc[-1]
+        rng = float(cur["High"] - cur["Low"])
+        compression = rng / atr if atr > 0 else None
+
+    return rr, atrp, room, compression
+
+
+# =========================
+# SETUP + MAG SCORING
+# =========================
+def calc_scores(bias, flags, rr, atrp, compression, entry, stop):
+    setup = 0
+    mag = 0
+
+    if bias == "LONG":
+        setup += 30 if flags["M_Bull"] else 0
+        setup += 20 if flags["W_Bull"] else 0
+        setup += 10 if flags["D_Bull"] else 0
+        setup += 20 if flags["W_212Up"] else 0
+        setup += 10 if flags["D_212Up"] else 0
+    else:
+        setup += 30 if flags["M_Bear"] else 0
+        setup += 20 if flags["W_Bear"] else 0
+        setup += 10 if flags["D_Bear"] else 0
+        setup += 20 if flags["W_212Dn"] else 0
+        setup += 10 if flags["D_212Dn"] else 0
+
+    setup += 10 if flags["W_Inside"] else 0
+    setup += 5 if flags["D_Inside"] else 0
+
+    # Magnitude scoring
+    if rr is not None:
+        if rr >= 3:
+            mag += 35
+        elif rr >= 2:
+            mag += 25
+        elif rr >= 1.5:
+            mag += 10
+
+    if atrp is not None:
+        if atrp >= 3:
+            mag += 20
+        elif atrp >= 2:
+            mag += 10
+        elif atrp >= 1:
+            mag += 5
+
+    if compression is not None:
+        if compression <= 0.6:
+            mag += 15
+        elif compression <= 0.9:
+            mag += 8
+        elif compression <= 1.2:
+            mag += 3
+
+    if entry is not None and stop is not None:
+        mag += 5
+
+    total = setup + mag
+    return setup, mag, total
+
+
+# =========================
+# ANALYZE TICKER
+# =========================
+def analyze_ticker(ticker, bias="LONG"):
+    d = get_hist(ticker)
+    if d.empty:
         return None
 
-    close = df["Close"].dropna()
-    if close.empty:
-        return None
+    d_tf, w_tf, m_tf = tf_frames(d)
+    flags = compute_flags(d_tf, w_tf, m_tf)
 
-    if len(close) < (rs_long + 10) or len(spy_close) < (rs_long + 10):
-        return None
+    tf, entry, stop = best_trigger(bias, d_tf, w_tf)
 
-    rs_s = float(rs_vs_spy(close, spy_close, int(rs_short)).iloc[-1])
-    rs_l = float(rs_vs_spy(close, spy_close, int(rs_long)).iloc[-1])
-    rot = rs_s - rs_l
+    rr, atrp, room, compression = magnitude_metrics(
+        bias, d_tf, entry, stop
+    )
 
-    tr = trend_label(close, int(ema_trend_len))  # fixes NameError: tr
-    rsi = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
+    setup_score, mag_score, total_score = calc_scores(
+        bias,
+        flags,
+        rr,
+        atrp,
+        compression,
+        entry,
+        stop,
+    )
 
-    strength = int(strength_meter(rs_s, rot, tr))
-    meter = strength_label(strength)
+    close = float(d_tf["Close"].iloc[-1])
+    rsi = float(rsi_wilder(d_tf["Close"]).iloc[-1])
 
-    # direction bias from trend (optional filter)
-    direction = "LONG" if tr == "UP" else ("SHORT" if tr == "DOWN" else None)
+    trend = trend_label(d_tf["Close"], 50)
 
-    # STRAT bars + trigger (safe for df + direction)
-    bt_prev, bt_last = strat_bar_types(df)
-    trigger_status = best_trigger(df, direction=direction)
-
-    entry = float(close.iloc[-1])
-    stop = float(close.rolling(20).min().iloc[-1]) if len(close) >= 20 else float(close.min())
+    strength = strength_meter(0, 0, trend)
 
     return {
-        "Ticker": ticker.upper(),
+        "Ticker": ticker,
+        "Close": round(close, 2),
+        "RSI": round(rsi, 1),
+        "Trend": trend,
         "Strength": strength,
-        "Meter": meter,
-        "Trend": tr,
-        "RSI": rsi,
-        "RS_short": rs_s,
-        "RS_long": rs_l,
-        "Rotation": rot,
-
-        # ✅ These are what your scanner page expects
-        "Strat_Prev": bt_prev,
-        "Strat_Last": bt_last,
-        "TriggerStatus": trigger_status,
-
-        "TF": "D",
-        "Entry": entry,
-        "Stop": stop,
+        "SetupScore": setup_score,
+        "MagScore": mag_score,
+        "TotalScore": total_score,
+        "TF": tf,
+        "Entry": None if entry is None else round(entry, 2),
+        "Stop": None if stop is None else round(stop, 2),
+        "RR": None if rr is None else round(rr, 2),
+        "ATR%": None if atrp is None else round(atrp, 2),
+        "Room": None if room is None else round(room, 2),
+        "Flags": flags,
     }
 
 
-def writeup_block(info: Dict, pb_low: float = 40.0, pb_high: float = 55.0):
-    import streamlit as st
+# =========================
+# TRADE NOTES GENERATOR
+# =========================
+def trade_plan_notes(data):
+    if data is None:
+        return "No data available."
 
-    st.markdown(f"### {info['Ticker']} — {info['Meter']} ({info['Strength']}/100)")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Trend", info["Trend"])
-    c2.metric("RSI", f"{info['RSI']:.1f}")
-    c3.metric("RS short", f"{info['RS_short']:.2%}")
-    c4.metric("Rotation", f"{info['Rotation']:.2%}")
+    notes = []
 
-    st.write(f"STRAT Bars: **{info.get('Strat_Prev','n/a')} → {info.get('Strat_Last','n/a')}**")
-    st.write(f"Trigger: **{info['TriggerStatus']}**  | TF: **{info['TF']}**")
-    st.write(f"Entry (guide): **{info['Entry']:.2f}**")
-    st.write(f"Stop (guide): **{info['Stop']:.2f}**")
+    notes.append(f"Trend: {data['Trend']}")
+    notes.append(f"RSI: {data['RSI']}")
 
-    if info["Trend"] == "UP" and (pb_low <= info["RSI"] <= pb_high):
-        st.success(f"Pullback zone OK (RSI {pb_low}–{pb_high})")
+    if data["Entry"]:
+        notes.append(
+            f"Trigger above {data['Entry']} with stop {data['Stop']}."
+        )
     else:
-        st.info("Pullback zone not confirmed.")
+        notes.append("No Inside Bar trigger yet.")
+
+    if data["RR"]:
+        notes.append(f"Risk/Reward ≈ {data['RR']}")
+
+    notes.append(
+        f"Setup score {data['SetupScore']} + magnitude {data['MagScore']}."
+    )
+
+    return "\n".join(notes)
+
+
+# =========================
+# WRITEUP BLOCK
+# =========================
+def writeup_block(data):
+    if data is None:
+        return "Ticker not found."
+
+    lines = [
+        f"### {data['Ticker']} Trade Summary",
+        f"- Trend: **{data['Trend']}**",
+        f"- Strength Score: **{data['Strength']}**",
+        f"- RSI: **{data['RSI']}**",
+        f"- Setup Score: **{data['SetupScore']}**",
+        f"- Magnitude Score: **{data['MagScore']}**",
+        f"- Total Score: **{data['TotalScore']}**",
+    ]
+
+    if data["Entry"]:
+        lines.append(
+            f"- Trigger: Break **{data['Entry']}**, stop **{data['Stop']}**"
+        )
+        lines.append(f"- RR: **{data['RR']}**")
+
+    return "\n".join(lines)
