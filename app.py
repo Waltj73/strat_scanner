@@ -1352,25 +1352,16 @@ def show_scanner():
         sectors_df = sectors_df.sort_values("Dominance", ascending=False)
 
     st.subheader("Sectors + Metals — ranked after bias is known")
-    display_df = sectors_df[[ 
-    "Sector","ETF","BullScore","BearScore",
-    "D_Bull","W_Bull","M_Bull","D_Bear","W_Bear","M_Bear",
-    "D_Inside","W_Inside","M_Inside",
-    "D_212Up","W_212Up","D_212Dn","W_212Dn"
-]].copy()
-
-flag_cols = [
-    "D_Bull","W_Bull","M_Bull",
-    "D_Bear","W_Bear","M_Bear",
-    "D_Inside","W_Inside","M_Inside",
-    "D_212Up","W_212Up","D_212Dn","W_212Dn"
-]
-
-for col in flag_cols:
-    display_df[col] = display_df[col].apply(flag_icon)
-
-st.dataframe(display_df, use_container_width=True, hide_index=True)
-
+    st.dataframe(
+        sectors_df[[
+            "Sector","ETF","BullScore","BearScore",
+            "D_Bull","W_Bull","M_Bull","D_Bear","W_Bear","M_Bear",
+            "D_Inside","W_Inside","M_Inside",
+            "D_212Up","W_212Up","D_212Dn","W_212Dn"
+        ]],
+        use_container_width=True,
+        hide_index=True
+    )
 
     st.subheader("Drill into a group (ranks candidates in bias direction + magnitude)")
 
