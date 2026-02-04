@@ -602,8 +602,7 @@ def analyze_ticker(
     flags = compute_flags(d_tf, w_tf, m_tf)
 
     tf, entry, stop = best_trigger("LONG", d_tf, w_tf)
-    trigger_ready = (entry is not None and stop is not None)
-trigger_status = "READY" if trigger_ready else "WAIT (No Inside Bar)"
+    trigger_status = "READY" if (flags["W_Inside"] or flags["D_Inside"]) else "WAIT (No Inside Bar)"
 
     entry_r = None if entry is None else round(float(entry), 2)
     stop_r  = None if stop  is None else round(float(stop), 2)
