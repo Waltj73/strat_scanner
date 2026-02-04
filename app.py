@@ -673,13 +673,7 @@ def writeup_block(info: Dict, pb_low: float, pb_high: float) -> None:
     with c4: st.write(f"**Rotation:** {info['Rotation']*100:.1f}%")
 
     pb_ok = pullback_zone_ok(info["Trend"], info["RSI"], pb_low, pb_high)
-    status_html = (
-    "<span style='color:#16a34a; font-weight:700;'>✅ YES</span>"
-    if pb_ok
-    else "<span style='color:#dc2626; font-weight:700;'>❌ NO</span>"
-)
-
-st.markdown(f"**Pullback Zone ({pb_low}-{pb_high}) OK?** {status_html}", unsafe_allow_html=True)
+    st.write(f"**Pullback Zone ({pb_low}-{pb_high}) OK?** {'✅ YES' if pb_ok else '❌ NO'}")
 
     st.write(
         f"**Trigger:** {info['TriggerStatus']}"
