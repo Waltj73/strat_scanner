@@ -1,136 +1,98 @@
-# strat_scanner/data.py — data fetch + resampling (cloud-safe)
-
 from __future__ import annotations
 
-import numpy as np
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import Optional
+
 import pandas as pd
-import streamlit as st
 import yfinance as yf
 
-REQUIRED_COLS = ["Open", "High", "Low", "Close", "Volume"]
 
-def _ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-    if not isinstance(df.index, pd.DatetimeIndex):
-        df.index = pd.to_datetime(df.index, errors="coerce")
-    df = df[~df.index.isna()].copy()
-    try:
-        df.index = df.index.tz_localize(None)
-    except Exception:
-        pass
-    df = df.sort_index()
-    df = df[~df.index.duplicated(keep="last")]
-    return df
+@dataclass(frozen=True)
+class HistParams:
+    period: str = "2y"
+    interval: str = "1d"
+    auto_adjust: bool = False
 
-def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+
+def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure output has standard columns: Open, High, Low, Close, Volume.
+    Handles yfinance MultiIndex columns, weird naming, etc.
+    """
     if df is None or df.empty:
         return pd.DataFrame()
 
-    df = _ensure_datetime_index(df)
-    if df.empty:
-        return pd.DataFrame()
-
-    # yfinance sometimes returns MultiIndex columns
+    # If yfinance returns multiindex columns (e.g., ('Close', 'SPY'))
     if isinstance(df.columns, pd.MultiIndex):
-        lvl0 = df.columns.get_level_values(0)
-        lvl1 = df.columns.get_level_values(1)
+        df = df.copy()
+        df.columns = [c[0] for c in df.columns]
 
-        if set(REQUIRED_COLS).issubset(set(lvl0)):
-            # columns like ("Open", "AAPL")
-            if ticker in set(lvl1):
-                df = df.xs(ticker, axis=1, level=1, drop_level=True)
-            else:
-                df.columns = [c[0] for c in df.columns]
-        elif set(REQUIRED_COLS).issubset(set(lvl1)):
-            # columns like ("AAPL", "Open")
-            if ticker in set(lvl0):
-                df = df.xs(ticker, axis=1, level=0, drop_level=True)
-            else:
-                df.columns = [c[1] for c in df.columns]
-        else:
-            df.columns = [c[0] for c in df.columns]
-
-    # normalize column names
-    rename = {}
+    # Standardize column names
+    rename_map = {}
     for c in df.columns:
-        if not isinstance(c, str):
-            continue
-        lc = c.lower()
-        if lc == "open":
-            rename[c] = "Open"
-        elif lc == "high":
-            rename[c] = "High"
-        elif lc == "low":
-            rename[c] = "Low"
-        elif lc in ("close", "adj close", "adjclose", "adj_close"):
-            rename[c] = "Close"
-        elif lc == "volume":
-            rename[c] = "Volume"
-    if rename:
-        df = df.rename(columns=rename)
+        cl = str(c).strip().lower()
+        if cl == "open":
+            rename_map[c] = "Open"
+        elif cl == "high":
+            rename_map[c] = "High"
+        elif cl == "low":
+            rename_map[c] = "Low"
+        elif cl == "close":
+            rename_map[c] = "Close"
+        elif cl == "adj close":
+            rename_map[c] = "Close"
+        elif cl == "volume":
+            rename_map[c] = "Volume"
 
-    # ensure required cols exist
-    if "Close" not in df.columns:
-        return pd.DataFrame()
-    if "Volume" not in df.columns:
-        df["Volume"] = 0.0
+    df = df.rename(columns=rename_map)
 
-    df = df[[c for c in REQUIRED_COLS if c in df.columns]].copy()
-    if not set(["Open", "High", "Low", "Close"]).issubset(df.columns):
-        return pd.DataFrame()
+    needed = ["Open", "High", "Low", "Close", "Volume"]
+    for c in needed:
+        if c not in df.columns:
+            # allow missing volume sometimes (indices)
+            if c == "Volume":
+                df[c] = 0.0
+            else:
+                return pd.DataFrame()
 
-    for c in REQUIRED_COLS:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    df = df.dropna(subset=["Open", "High", "Low", "Close"])
-    return df
-
-@st.cache_data(ttl=60 * 30, show_spinner=False)
-def get_hist(ticker: str, period: str = "3y") -> pd.DataFrame:
-    try:
-        raw = yf.download(
-            ticker,
-            period=period,
-            interval="1d",
-            auto_adjust=False,
-            progress=False,
-            group_by="column",
-            threads=True,
-        )
-    except Exception:
-        return pd.DataFrame()
-    return _flatten_yf_columns(raw, ticker)
-
-def resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    df = _ensure_datetime_index(df)
-    if df.empty:
-        return pd.DataFrame()
-
-    df = df.dropna(subset=["Open", "High", "Low", "Close"])
-    if df.empty:
-        return pd.DataFrame()
-
-    def safe_first(x):
-        x = x.dropna()
-        return x.iloc[0] if len(x) else np.nan
-
-    def safe_last(x):
-        x = x.dropna()
-        return x.iloc[-1] if len(x) else np.nan
-
-    g = df.resample(rule)
-    out = pd.DataFrame({
-        "Open": g["Open"].apply(safe_first),
-        "High": g["High"].max(),
-        "Low": g["Low"].min(),
-        "Close": g["Close"].apply(safe_last),
-        "Volume": g["Volume"].sum(),
-    }).dropna(subset=["Open", "High", "Low", "Close"])
-
+    out = df[needed].copy()
+    out = out.dropna(subset=["Close"])
+    out.index = pd.to_datetime(out.index)
     return out
 
+
+@lru_cache(maxsize=512)
+def _download_hist(ticker: str, period: str, interval: str, auto_adjust: bool) -> bytes:
+    """
+    Cached raw download. We return bytes (parquet) to keep lru_cache stable.
+    """
+    t = ticker.strip().upper()
+    raw = yf.download(
+        t,
+        period=period,
+        interval=interval,
+        auto_adjust=auto_adjust,
+        progress=False,
+        threads=False,
+        group_by="column",
+    )
+
+    raw = _normalize_ohlcv(raw)
+    if raw.empty:
+        return b""
+
+    # serialize to parquet in-memory
+    return raw.to_parquet(index=True)
+
+
+def get_hist(ticker: str, params: Optional[HistParams] = None) -> pd.DataFrame:
+    """
+    Public function used everywhere.
+    Returns a clean OHLCV DataFrame or empty DataFrame.
+    """
+    params = params or HistParams()
+    blob = _download_hist(ticker.strip().upper(), params.period, params.interval, params.auto_adjust)
+    if not blob:
+        return pd.DataFrame()
+    return pd.read_parquet(pd.io.common.BytesIO(blob))
