@@ -615,8 +615,86 @@ def analyze_ticker(
     d_tf, w_tf, m_tf = tf_frames(d)
     flags = compute_flags(d_tf, w_tf, m_tf)
 
+      def classify_trigger_status(
+    direction: str,
+    trend: str,
+    flags: Dict[str, bool],
+    strength: int,
+    rotation: float,
+    pb_ok: bool,
+    tf: Optional[str],
+    entry: Optional[float],
+    stop: Optional[float],
+) -> Tuple[str, str]:
+    """
+    Returns (TriggerStatus, TriggerDetail)
+    READY     = entry+stop exist AND inside-bar trigger exists (W preferred)
+    BUILDING  = leadership/setup is decent but no clean trigger yet
+    INVALID   = structure/trend not aligned for the chosen direction
+    """
+
+    direction = (direction or "LONG").upper()
+
+    # --- hard invalidation (for now: long-only bias in analyzer/watchlist)
+    if direction == "LONG" and trend != "UP":
+        return "INVALID", "Trend is not UP (price below/flat vs EMA)."
+
+    # Inside bar present?
+    has_w_inside = bool(flags.get("W_Inside", False))
+    has_d_inside = bool(flags.get("D_Inside", False))
+    has_inside = has_w_inside or has_d_inside
+
+    # Entry/stop known?
+    has_levels = (entry is not None) and (stop is not None)
+
+    # READY: clean trigger + levels
+    if has_inside and has_levels:
+        which = "W" if has_w_inside else "D"
+        detail = f"READY ({which} Inside Bar) — entry/stop defined."
+        # Extra context for pullback
+        if pb_ok:
+            detail += " Pullback zone OK."
+        else:
+            detail += " Pullback zone not confirmed."
+        return "READY", detail
+
+    # BUILDING vs INVALID logic
+    # Define "setup quality" in a stable way (no overfitting)
+    rot_good = rotation > 0
+    setup_ok = (strength >= 45) and (rot_good or pb_ok)
+
+    if setup_ok:
+        missing = []
+        if not has_inside:
+            missing.append("no Inside Bar yet")
+        if not has_levels:
+            missing.append("entry/stop not defined")
+        miss_txt = ", ".join(missing) if missing else "needs cleaner structure"
+        return "BUILDING", f"BUILDING — {miss_txt}. Good candidate; wait for trigger."
+    else:
+        why = []
+        if strength < 45:
+            why.append("weak strength")
+        if rotation <= 0:
+            why.append("rotation not positive")
+        if not pb_ok:
+            why.append("not in pullback zone")
+        return "INVALID", "INVALID — " + ", ".join(why) + "."
+
     tf, entry, stop = best_trigger("LONG", d_tf, w_tf)
-    trigger_status = "READY" if (flags["W_Inside"] or flags["D_Inside"]) else "WAIT (No Inside Bar)"
+
+pb_ok = pullback_zone_ok(tr, rsi_v, 40, 55)  # default logic for classification (UI sliders still used in writeup)
+trigger_status, trigger_detail = classify_trigger_status(
+    direction="LONG",
+    trend=tr,
+    flags=flags,
+    strength=strength,
+    rotation=rot,
+    pb_ok=pb_ok,
+    tf=tf,
+    entry=entry,
+    stop=stop,
+)
 
     entry_r = None if entry is None else round(float(entry), 2)
     stop_r  = None if stop  is None else round(float(stop), 2)
