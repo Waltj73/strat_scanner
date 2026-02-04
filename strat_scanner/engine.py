@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from typing import Optional, Dict
-
 import pandas as pd
 
 from strat_scanner.data import get_hist
@@ -12,7 +11,7 @@ from strat_scanner.indicators import (
     strength_meter,
     strength_label,
 )
-from strat_scanner.strat import best_trigger
+from strat_scanner.strat import best_trigger, strat_bar_types
 
 
 def analyze_ticker(
@@ -23,13 +22,6 @@ def analyze_ticker(
     ema_trend_len: int,
     rsi_len: int,
 ) -> Optional[Dict]:
-    """
-    Single source of truth used by:
-      - scanner page
-      - dashboard page
-      - analyzer page
-    Must remain stable.
-    """
     df = get_hist(ticker)
     if df is None or df.empty or "Close" not in df.columns:
         return None
@@ -38,7 +30,6 @@ def analyze_ticker(
     if close.empty:
         return None
 
-    # Ensure enough history for RS calcs
     if len(close) < (rs_long + 10) or len(spy_close) < (rs_long + 10):
         return None
 
@@ -46,22 +37,21 @@ def analyze_ticker(
     rs_l = float(rs_vs_spy(close, spy_close, int(rs_long)).iloc[-1])
     rot = rs_s - rs_l
 
-    tr = trend_label(close, int(ema_trend_len))  # <-- fixes NameError: tr
+    tr = trend_label(close, int(ema_trend_len))  # fixes NameError: tr
     rsi = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
 
     strength = int(strength_meter(rs_s, rot, tr))
     meter = strength_label(strength)
 
-    # Strat trigger (direction filter optional)
+    # direction bias from trend (optional filter)
     direction = "LONG" if tr == "UP" else ("SHORT" if tr == "DOWN" else None)
-    trigger_status = best_trigger(df, direction=direction)  # accepts df + direction safely now
 
-    # Basic entry/stop scaffolding (non-magical, stable)
+    # STRAT bars + trigger (safe for df + direction)
+    bt_prev, bt_last = strat_bar_types(df)
+    trigger_status = best_trigger(df, direction=direction)
+
     entry = float(close.iloc[-1])
-    if len(close) >= 20:
-        stop = float(close.rolling(20).min().iloc[-1])
-    else:
-        stop = float(close.min())
+    stop = float(close.rolling(20).min().iloc[-1]) if len(close) >= 20 else float(close.min())
 
     return {
         "Ticker": ticker.upper(),
@@ -72,36 +62,34 @@ def analyze_ticker(
         "RS_short": rs_s,
         "RS_long": rs_l,
         "Rotation": rot,
+
+        # ✅ These are what your scanner page expects
+        "Strat_Prev": bt_prev,
+        "Strat_Last": bt_last,
         "TriggerStatus": trigger_status,
+
         "TF": "D",
         "Entry": entry,
         "Stop": stop,
     }
 
 
-def writeup_block(info: Dict, pb_low: float = 40.0, pb_high: float = 60.0):
-    """
-    Used by pages/analyzer.py (your logs show analyzer imports this). :contentReference[oaicite:2]{index=2}
-    Kept here so pages stay thin and imports stay consistent.
-    """
+def writeup_block(info: Dict, pb_low: float = 40.0, pb_high: float = 55.0):
     import streamlit as st
 
     st.markdown(f"### {info['Ticker']} — {info['Meter']} ({info['Strength']}/100)")
-
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Trend", info["Trend"])
     c2.metric("RSI", f"{info['RSI']:.1f}")
     c3.metric("RS short", f"{info['RS_short']:.2%}")
     c4.metric("Rotation", f"{info['Rotation']:.2%}")
 
+    st.write(f"STRAT Bars: **{info.get('Strat_Prev','n/a')} → {info.get('Strat_Last','n/a')}**")
     st.write(f"Trigger: **{info['TriggerStatus']}**  | TF: **{info['TF']}**")
     st.write(f"Entry (guide): **{info['Entry']:.2f}**")
     st.write(f"Stop (guide): **{info['Stop']:.2f}**")
 
-    # Simple pullback zone helper (optional)
     if info["Trend"] == "UP" and (pb_low <= info["RSI"] <= pb_high):
-        st.success(f"Pullback zone OK (RSI between {pb_low}–{pb_high})")
-    elif info["Trend"] == "DOWN" and (pb_low <= info["RSI"] <= pb_high):
-        st.info("Downtrend + mid RSI (watch for bear continuation triggers).")
+        st.success(f"Pullback zone OK (RSI {pb_low}–{pb_high})")
     else:
         st.info("Pullback zone not confirmed.")
