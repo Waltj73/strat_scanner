@@ -42,12 +42,6 @@ METALS_ETFS = {
     "Metals - Palladium": "PALL",
 }
 
-CRYPTO_SYMBOLS = {
-    "Crypto - Bitcoin": "BTC-USD",
-    "Crypto - Ethereum": "ETH-USD",
-    "Crypto - Solana": "SOL-USD",
-}
-
 SECTOR_ETFS = {
     "Energy": "XLE",
     "Comm Services": "XLC",
@@ -61,8 +55,7 @@ SECTOR_ETFS = {
     "Technology": "XLK",
     "Health Care": "XLV",
     **METALS_ETFS,
-    **CRYPTO_SYMBOLS,
-}
+    }
 
 SECTOR_TICKERS: Dict[str, List[str]] = {
     "Energy": ["XOM","CVX","COP","EOG","SLB","HAL","PSX","MPC","VLO","OXY","KMI","WMB","BKR","DVN","PXD"],
@@ -83,9 +76,6 @@ SECTOR_TICKERS: Dict[str, List[str]] = {
     "Metals - Platinum": ["PPLT"],
     "Metals - Palladium": ["PALL"],
 
-    "Crypto - Bitcoin": ["BTC-USD"],
-    "Crypto - Ethereum": ["ETH-USD"],
-    "Crypto - Solana": ["SOL-USD"],
 }
 
 REQUIRED_COLS = ["Open", "High", "Low", "Close", "Volume"]
