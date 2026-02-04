@@ -1,141 +1,180 @@
-# strat_scanner/strat.py — STRAT candle logic + regime scoring
-
+# strat_scanner/strat.py
+# STRAT candle typing + setups + actionable trigger logic
 from __future__ import annotations
-from typing import Dict, Optional, Tuple
 
+from dataclasses import dataclass
+from typing import Optional, Dict, Tuple
+import numpy as np
 import pandas as pd
-from strat_scanner.data import resample_ohlc
 
-def is_inside_bar(cur: pd.Series, prev: pd.Series) -> bool:
-    return (cur["High"] <= prev["High"]) and (cur["Low"] >= prev["Low"])
 
-def is_2up(cur: pd.Series, prev: pd.Series) -> bool:
-    return (cur["High"] > prev["High"]) and (cur["Low"] >= prev["Low"])
+def _norm_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure O/H/L/C columns exist and are floats."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    # allow lowercase
+    cols = {c.lower(): c for c in out.columns}
+    for want in ["open", "high", "low", "close"]:
+        if want not in cols:
+            return pd.DataFrame()
+    out = out[[cols["open"], cols["high"], cols["low"], cols["close"]]].copy()
+    out.columns = ["Open", "High", "Low", "Close"]
+    for c in ["Open", "High", "Low", "Close"]:
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+    out = out.dropna()
+    return out
 
-def is_2dn(cur: pd.Series, prev: pd.Series) -> bool:
-    return (cur["Low"] < prev["Low"]) and (cur["High"] <= prev["High"])
 
-def is_green(cur: pd.Series) -> bool:
-    return cur["Close"] > cur["Open"]
+def strat_type(df: pd.DataFrame) -> pd.Series:
+    """
+    STRAT candle types:
+      1  = inside (lower high AND higher low)
+      2U = higher high AND higher low
+      2D = lower high AND lower low
+      3  = higher high AND lower low (outside)
+    """
+    d = _norm_cols(df)
+    if d.empty or len(d) < 2:
+        return pd.Series(dtype="object")
 
-def is_red(cur: pd.Series) -> bool:
-    return cur["Close"] < cur["Open"]
+    h = d["High"]
+    l = d["Low"]
+    ph = h.shift(1)
+    pl = l.shift(1)
 
-def last_two(df: pd.DataFrame) -> Optional[Tuple[pd.Series, pd.Series]]:
-    if df is None or df.empty or len(df) < 2:
-        return None
-    return df.iloc[-1], df.iloc[-2]
+    inside = (h <= ph) & (l >= pl)
+    up = (h > ph) & (l >= pl)
+    down = (h <= ph) & (l < pl)
+    outside = (h > ph) & (l < pl)
 
-def strat_bull(df: pd.DataFrame) -> bool:
-    pair = last_two(df)
-    if not pair:
-        return False
-    cur, prev = pair
-    return is_2up(cur, prev) and is_green(cur)
+    t = pd.Series(index=d.index, dtype="object")
+    t[inside] = "1"
+    t[up] = "2U"
+    t[down] = "2D"
+    t[outside] = "3"
+    t = t.fillna("—")
+    return t
 
-def strat_bear(df: pd.DataFrame) -> bool:
-    pair = last_two(df)
-    if not pair:
-        return False
-    cur, prev = pair
-    return is_2dn(cur, prev) and is_red(cur)
 
-def strat_inside(df: pd.DataFrame) -> bool:
-    pair = last_two(df)
-    if not pair:
-        return False
-    cur, prev = pair
-    return is_inside_bar(cur, prev)
+def _atr(d: pd.DataFrame, n: int = 14) -> float:
+    """Simple ATR for target guidance."""
+    if d is None or d.empty or len(d) < n + 2:
+        return float("nan")
+    high = d["High"]
+    low = d["Low"]
+    close = d["Close"]
+    prev_close = close.shift(1)
+    tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(n).mean().iloc[-1]
+    return float(atr) if np.isfinite(atr) else float("nan")
 
-def strat_212_up(df: pd.DataFrame) -> bool:
-    if df is None or df.empty or len(df) < 4:
-        return False
-    a, b, c = df.iloc[-3], df.iloc[-2], df.iloc[-1]
-    prev_a = df.iloc[-4]
-    return is_2up(a, prev_a) and is_inside_bar(b, a) and is_2up(c, b)
 
-def strat_212_dn(df: pd.DataFrame) -> bool:
-    if df is None or df.empty or len(df) < 4:
-        return False
-    a, b, c = df.iloc[-3], df.iloc[-2], df.iloc[-1]
-    prev_a = df.iloc[-4]
-    return is_2dn(a, prev_a) and is_inside_bar(b, a) and is_2dn(c, b)
+def detect_setups(df: pd.DataFrame) -> Dict[str, bool]:
+    """
+    Detect core STRAT patterns on the last 3 bars:
+      - inside_bar: last bar is a 1
+      - two_one_two_up: 2U-1-2U (or 2U-1 and current is 2U)
+      - two_one_two_down: 2D-1-2D
+      - three_one_two_up: 3-1-2U
+      - three_one_two_down: 3-1-2D
+    """
+    d = _norm_cols(df)
+    if d.empty or len(d) < 3:
+        return {
+            "inside_bar": False,
+            "two_one_two_up": False,
+            "two_one_two_down": False,
+            "three_one_two_up": False,
+            "three_one_two_down": False,
+        }
 
-def tf_frames(daily: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    d = daily.copy()
-    w = resample_ohlc(daily, "W-FRI")
-    m = resample_ohlc(daily, "M")
-    return d, w, m
+    t = strat_type(d)
+    last3 = list(t.iloc[-3:].values)
+    a, b, c = last3[0], last3[1], last3[2]
 
-def compute_flags(d: pd.DataFrame, w: pd.DataFrame, m: pd.DataFrame) -> Dict[str, bool]:
+    inside_bar = (c == "1")
+    two_one_two_up = (a == "2U" and b == "1" and c == "2U")
+    two_one_two_down = (a == "2D" and b == "1" and c == "2D")
+    three_one_two_up = (a == "3" and b == "1" and c == "2U")
+    three_one_two_down = (a == "3" and b == "1" and c == "2D")
+
     return {
-        "D_Bull": strat_bull(d),
-        "W_Bull": strat_bull(w),
-        "M_Bull": strat_bull(m),
-        "D_Bear": strat_bear(d),
-        "W_Bear": strat_bear(w),
-        "M_Bear": strat_bear(m),
-        "D_Inside": strat_inside(d),
-        "W_Inside": strat_inside(w),
-        "M_Inside": strat_inside(m),
-        "D_212Up": strat_212_up(d),
-        "W_212Up": strat_212_up(w),
-        "D_212Dn": strat_212_dn(d),
-        "W_212Dn": strat_212_dn(w),
+        "inside_bar": bool(inside_bar),
+        "two_one_two_up": bool(two_one_two_up),
+        "two_one_two_down": bool(two_one_two_down),
+        "three_one_two_up": bool(three_one_two_up),
+        "three_one_two_down": bool(three_one_two_down),
     }
 
-def score_regime(flags: Dict[str, bool]) -> Tuple[int, int]:
-    bull = 0
-    bear = 0
 
-    bull += 3 if flags["M_Bull"] else 0
-    bull += 2 if flags["W_Bull"] else 0
-    bull += 1 if flags["D_Bull"] else 0
-    bear += 3 if flags["M_Bear"] else 0
-    bear += 2 if flags["W_Bear"] else 0
-    bear += 1 if flags["D_Bear"] else 0
+def best_trigger(df: pd.DataFrame) -> Dict[str, object]:
+    """
+    Produce a single “best” actionable STRAT idea:
+      - Direction: LONG / SHORT / NONE
+      - Setup: IB / 2-1-2 / 3-1-2 / NONE
+      - Status: WAIT / READY
+      - Entry/Stop: based on last bar range
+    """
+    d = _norm_cols(df)
+    if d.empty or len(d) < 3:
+        return {
+            "Setup": "NONE",
+            "Direction": "NONE",
+            "Status": "WAIT",
+            "Entry": float("nan"),
+            "Stop": float("nan"),
+            "Note": "No data",
+        }
 
-    bull += 2 if flags["W_212Up"] else 0
-    bull += 1 if flags["D_212Up"] else 0
-    bear += 2 if flags["W_212Dn"] else 0
-    bear += 1 if flags["D_212Dn"] else 0
+    setups = detect_setups(d)
+    last = d.iloc[-1]
+    prev = d.iloc[-2]
 
-    return bull, bear
+    # Baseline levels (used for triggers)
+    long_entry = float(last["High"])   # break last high
+    long_stop = float(last["Low"])     # invalidate below last low
+    short_entry = float(last["Low"])   # break last low
+    short_stop = float(last["High"])   # invalidate above last high
 
-def market_bias_and_strength(market_rows) -> Tuple[str, int, int]:
-    bull_total = sum(r["BullScore"] for r in market_rows)
-    bear_total = sum(r["BearScore"] for r in market_rows)
-    diff = bull_total - bear_total
+    # Priority: 3-1-2 > 2-1-2 > inside bar
+    if setups["three_one_two_up"]:
+        return {"Setup": "3-1-2", "Direction": "LONG", "Status": "READY", "Entry": long_entry, "Stop": long_stop,
+                "Note": "3-1-2U breakout idea (break last high)."}
+    if setups["three_one_two_down"]:
+        return {"Setup": "3-1-2", "Direction": "SHORT", "Status": "READY", "Entry": short_entry, "Stop": short_stop,
+                "Note": "3-1-2D breakdown idea (break last low)."}
 
-    strength = int(max(0, min(100, 50 + diff * 5)))
+    if setups["two_one_two_up"]:
+        return {"Setup": "2-1-2", "Direction": "LONG", "Status": "READY", "Entry": long_entry, "Stop": long_stop,
+                "Note": "2-1-2U continuation idea (break last high)."}
+    if setups["two_one_two_down"]:
+        return {"Setup": "2-1-2", "Direction": "SHORT", "Status": "READY", "Entry": short_entry, "Stop": short_stop,
+                "Note": "2-1-2D continuation idea (break last low)."}
 
-    if diff >= 3:
-        bias = "LONG"
-    elif diff <= -3:
-        bias = "SHORT"
-    else:
-        bias = "MIXED"
+    # Inside bar -> “ready” only if compression (range smaller than prior)
+    is_inside = strat_type(d).iloc[-1] == "1"
+    if is_inside:
+        rng = float(last["High"] - last["Low"])
+        prng = float(prev["High"] - prev["Low"])
+        status = "READY" if (rng <= prng) else "WAIT"
+        return {"Setup": "IB", "Direction": "BOTH", "Status": status, "Entry": float(last["High"]), "Stop": float(last["Low"]),
+                "Note": "Inside bar. Long above high / short below low."}
 
-    return bias, strength, diff
+    return {"Setup": "NONE", "Direction": "NONE", "Status": "WAIT", "Entry": float("nan"), "Stop": float("nan"),
+            "Note": "No clean STRAT trigger on last 3 bars."}
 
-def alignment_ok(bias: str, flags: Dict[str, bool]) -> bool:
-    if bias == "LONG":
-        return flags["M_Bull"] or flags["W_Bull"]
-    if bias == "SHORT":
-        return flags["M_Bear"] or flags["W_Bear"]
-    return False
 
-def best_trigger(bias: str, d: pd.DataFrame, w: pd.DataFrame):
-    # prefer weekly inside bar
-    if strat_inside(w) and len(w) >= 2:
-        cur = w.iloc[-1]
-        hi, lo = float(cur["High"]), float(cur["Low"])
-        return ("W", hi, lo) if bias == "LONG" else ("W", lo, hi)
+def targets_from_entry(entry: float, direction: str, atr: float) -> Tuple[float, float]:
+    """
+    Very light target guidance (not pretending to be perfect):
+    uses ATR multiples if available.
+    """
+    if not np.isfinite(entry) or not np.isfinite(atr) or atr <= 0:
+        return float("nan"), float("nan")
 
-    if strat_inside(d) and len(d) >= 2:
-        cur = d.iloc[-1]
-        hi, lo = float(cur["High"]), float(cur["Low"])
-        return ("D", hi, lo) if bias == "LONG" else ("D", lo, hi)
-
-    return (None, None, None)
-
+    if direction == "LONG":
+        return float(entry + 1.0 * atr), float(entry + 2.0 * atr)
+    if direction == "SHORT":
+        return float(entry - 1.0 * atr), float(entry - 2.0 * atr)
+    return float("nan"), float("nan")
