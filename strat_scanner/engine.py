@@ -1,7 +1,7 @@
-# strat_scanner/engine.py
 from __future__ import annotations
 
-from typing import Optional, Dict
+from typing import Dict, Optional
+
 import pandas as pd
 
 from strat_scanner.data import get_hist
@@ -12,7 +12,7 @@ from strat_scanner.indicators import (
     strength_meter,
     strength_label,
 )
-from strat_scanner.strat import best_trigger
+from strat_scanner.strat import best_trigger, strat_flags
 
 
 def analyze_ticker(
@@ -23,11 +23,6 @@ def analyze_ticker(
     ema_trend_len: int,
     rsi_len: int,
 ) -> Optional[Dict]:
-    """
-    Core analysis function used by Scanner / Dashboard / Analyzer.
-    Returns a dict with stable keys used across the app.
-    """
-
     df = get_hist(ticker)
     if df is None or df.empty or "Close" not in df.columns:
         return None
@@ -36,8 +31,8 @@ def analyze_ticker(
     if close.empty:
         return None
 
-    # Need enough history for RS lookbacks
-    if len(close) < (rs_long + 10) or spy_close is None or len(spy_close) < (rs_long + 10):
+    # Ensure enough history for returns
+    if len(close) < (rs_long + 10) or len(spy_close) < (rs_long + 10):
         return None
 
     rs_s = float(rs_vs_spy(close, spy_close, int(rs_short)).iloc[-1])
@@ -50,12 +45,15 @@ def analyze_ticker(
     strength = int(strength_meter(rs_s, rot, tr))
     meter = strength_label(strength)
 
-    # Trigger (stable string)
-    trigger_status = best_trigger(close)
+    # Strat trigger + flags (uses full DF safely)
+    flags = strat_flags(df)
+    trigger = best_trigger(df)
 
-    # Basic entry/stop scaffolding
+    # simple entry/stop scaffolding
     entry = float(close.iloc[-1])
-    stop = float(close.rolling(20).min().iloc[-1]) if len(close) >= 20 else float(close.min())
+    stop = float(df["Low"].rolling(20).min().iloc[-1]) if "Low" in df.columns and len(df) >= 20 else float(close.min())
+
+    direction = "LONG" if tr == "UP" else "SHORT"
 
     return {
         "Ticker": ticker.upper(),
@@ -66,7 +64,10 @@ def analyze_ticker(
         "RS_short": rs_s,
         "RS_long": rs_l,
         "Rotation": rot,
-        "TriggerStatus": trigger_status,
+        "Direction": direction,
+        "TriggerStatus": trigger,
+        "Strat_Last": flags.get("Last", "n/a"),
+        "Strat_Prev": flags.get("Prev", "n/a"),
         "TF": "D",
         "Entry": entry,
         "Stop": stop,
@@ -75,22 +76,23 @@ def analyze_ticker(
 
 def writeup_block(info: Dict, pb_low: float, pb_high: float):
     """
-    Streamlit rendering helper used by pages.
-    Keeping it here prevents duplication.
+    Streamlit rendering helper for consistent writeups across pages.
     """
     import streamlit as st
 
-    st.markdown(f"### {info['Ticker']} — {info['Meter']} ({info['Strength']}/100)")
-
-    c1, c2, c3, c4 = st.columns(4)
+    st.markdown(f"## {info['Ticker']} — {info['Meter']} ({info['Strength']}/100)")
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Trend", info["Trend"])
     c2.metric("RSI", f"{info['RSI']:.1f}")
     c3.metric("RS short", f"{info['RS_short']:.2%}")
     c4.metric("Rotation", f"{info['Rotation']:.2%}")
+    c5.metric("Bias", info.get("Direction", "n/a"))
 
-    st.write(f"Trigger: **{info['TriggerStatus']}**  | TF: **{info['TF']}**")
-    st.write(f"Entry (guide): **{info['Entry']:.2f}**")
-    st.write(f"Stop (guide): **{info['Stop']:.2f}**")
+    st.write(f"**STRAT:** Prev **{info.get('Strat_Prev','n/a')}** → Last **{info.get('Strat_Last','n/a')}**")
+    st.write(f"**Trigger:** {info['TriggerStatus']}  | TF: **{info['TF']}**")
+
+    st.write(f"**Entry (guide):** {info['Entry']:.2f}")
+    st.write(f"**Stop (guide):** {info['Stop']:.2f}")
 
     if info["Trend"] == "UP" and (pb_low <= info["RSI"] <= pb_high):
         st.success(f"Pullback zone OK (RSI between {pb_low}–{pb_high})")
