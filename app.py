@@ -1,22 +1,11 @@
-# app.py — STRAT Regime Scanner V1.4.2 (Step 3: Position Sizing + Order Ticket + CSV Export)
+# app.py — STRAT Regime Scanner V1.4.1 (Merged + Trade Plan Notes + Market Grade + STRAT Cheat Sheet)
 # Includes:
 # - Scanner (STRAT regime + triggers + ranking)
-# - Market Dashboard (sentiment + sector rotation + strength leaders + watchlist)
-# - Today Watchlist Builder
-# - Ticker Analyzer (explain scoring + STRAT context)
-# - Trade Plan Notes
-#
-# =========================
-# V1.4 STEP 3 CHANGES (SAFE)
-# =========================
-# ✅ Adds a simple, reliable EXECUTION layer (does NOT change setup logic):
-#   1) Risk inputs: $ risk per trade + max shares cap
-#   2) Auto position size (shares) when Entry/Stop exist
-#   3) Shows Stop distance, Shares, $ Risk, and R-multiple targets
-#   4) Generates an "Order Ticket" text block you can copy/paste
-#   5) Adds CSV download for Watchlist + Scanner results
-#
-# ✅ Low-risk: no changes to data fetching, STRAT detection, rotation, strength scoring.
+# - Market Dashboard (sentiment + sector rotation + strength leaders + Market Grade)
+# - Today Watchlist Builder (#5)
+# - Ticker Analyzer (search + explain scoring + STRAT trigger context)
+# - Trade Plan Notes (A/B/C grade, targets, invalidation, improve notes)
+# - STRAT Signals Cheat Sheet (actionable signals glossary + how to use in THIS app)
 
 import math
 from datetime import datetime, timezone
@@ -30,7 +19,7 @@ import yfinance as yf
 # =========================
 # STREAMLIT CONFIG
 # =========================
-st.set_page_config(page_title="STRAT Regime Scanner V1.4.2", layout="wide")
+st.set_page_config(page_title="STRAT Regime Scanner V1.4.1", layout="wide")
 
 # =========================
 # UNIVERSE
@@ -86,6 +75,23 @@ SECTOR_TICKERS: Dict[str, List[str]] = {
 }
 
 REQUIRED_COLS = ["Open", "High", "Low", "Close", "Volume"]
+
+# =========================
+# SESSION HELPERS
+# =========================
+def goto_page(page_name: str):
+    st.session_state["__page"] = page_name
+
+def page_selector(pages: List[str], default: str) -> str:
+    # Keep user on a page after button-driven navigation
+    if "__page" not in st.session_state:
+        st.session_state["__page"] = default
+    if st.session_state["__page"] not in pages:
+        st.session_state["__page"] = default
+    idx = pages.index(st.session_state["__page"])
+    sel = st.sidebar.radio("Go to", pages, index=idx)
+    st.session_state["__page"] = sel
+    return sel
 
 # =========================
 # DATA FETCH (CACHED) — HARDENED
@@ -257,8 +263,8 @@ def clamp_rs(x, lo, hi):
     except Exception:
         return 0.0
 
-RS_CAP = 0.10
-ROT_CAP = 0.08
+RS_CAP = 0.10      # ±10% cap for RS vs SPY
+ROT_CAP = 0.08     # ±8% cap for Rotation
 
 def strength_meter(rs_short_v: float, rotation_v: float, trend: str) -> int:
     rs_short_v = clamp_rs(rs_short_v, -RS_CAP, RS_CAP)
@@ -450,168 +456,6 @@ def best_trigger(bias: str, d: pd.DataFrame, w: pd.DataFrame) -> Tuple[Optional[
     return None, None, None
 
 # =========================
-# STEP 1 — SIGNAL TYPE
-# =========================
-def signal_type(flags: Dict[str, bool], bias: str) -> str:
-    if bias == "SHORT":
-        if flags.get("W_Inside", False):
-            return "Weekly Inside Breakdown"
-        if flags.get("D_Inside", False):
-            return "Daily Inside Breakdown"
-        if flags.get("W_212Dn", False):
-            return "Weekly 2-1-2 Continuation (Down)"
-        if flags.get("D_212Dn", False):
-            return "Daily 2-1-2 Continuation (Down)"
-        if flags.get("M_Bear", False) or flags.get("W_Bear", False):
-            return "Bear Continuation (Alignment)"
-        return "No Clean STRAT Setup"
-    else:
-        if flags.get("W_Inside", False):
-            return "Weekly Inside Breakout"
-        if flags.get("D_Inside", False):
-            return "Daily Inside Breakout"
-        if flags.get("W_212Up", False):
-            return "Weekly 2-1-2 Continuation (Up)"
-        if flags.get("D_212Up", False):
-            return "Daily 2-1-2 Continuation (Up)"
-        if flags.get("M_Bull", False) or flags.get("W_Bull", False):
-            return "Bull Continuation (Alignment)"
-        return "No Clean STRAT Setup"
-
-# =========================
-# STEP 2 — BETTER TRIGGER STATUS
-# =========================
-def _tf_icon(ok: bool) -> str:
-    return "✅" if ok else "❌"
-
-def trigger_status_v2(flags: Dict[str, bool], bias: str) -> Dict[str, str]:
-    d_ready = bool(flags.get("D_Inside", False))
-    w_ready = bool(flags.get("W_Inside", False))
-
-    if bias == "SHORT":
-        m_align = bool(flags.get("M_Bear", False))
-        m_label = "M: Bear Align" if m_align else "M: Not Bear Align"
-    else:
-        m_align = bool(flags.get("M_Bull", False))
-        m_label = "M: Bull Align" if m_align else "M: Not Bull Align"
-
-    headline = "READY" if (d_ready or w_ready) else "WAIT (No Inside Bar)"
-
-    ready_tf = f"D {_tf_icon(d_ready)} | W {_tf_icon(w_ready)} | M {_tf_icon(m_align)}"
-    return {
-        "TriggerStatus": headline,
-        "Trigger_D": "D: Inside Bar ✅" if d_ready else "D: No Inside Bar ❌",
-        "Trigger_W": "W: Inside Bar ✅" if w_ready else "W: No Inside Bar ❌",
-        "Trigger_M": m_label + (" ✅" if m_align else " ❌"),
-        "ReadyTimeframes": ready_tf,
-        "HasTrigger": "YES" if (d_ready or w_ready) else "NO",
-        "MonthlyAlignOK": bool(m_align),
-    }
-
-# =========================
-# STEP 3 — POSITION SIZING + ORDER TICKET (NEW)
-# =========================
-def position_sizing(
-    bias: str,
-    entry: Optional[float],
-    stop: Optional[float],
-    risk_dollars: float,
-    max_shares: int
-) -> Dict[str, Optional[float]]:
-    """
-    Shares = floor(risk_dollars / stop_distance)
-    Long stop_distance = entry - stop
-    Short stop_distance = stop - entry
-    """
-    out = {
-        "StopDist": None,
-        "Shares": None,
-        "DollarRisk": None,
-    }
-    if entry is None or stop is None:
-        return out
-    if risk_dollars is None or risk_dollars <= 0:
-        return out
-
-    if bias == "SHORT":
-        dist = float(stop - entry)
-    else:
-        dist = float(entry - stop)
-
-    if not math.isfinite(dist) or dist <= 0:
-        return out
-
-    sh = int(math.floor(float(risk_dollars) / dist))
-    if max_shares is not None and max_shares > 0:
-        sh = min(sh, int(max_shares))
-    if sh <= 0:
-        return out
-
-    out["StopDist"] = round(dist, 4)
-    out["Shares"] = sh
-    out["DollarRisk"] = round(sh * dist, 2)
-    return out
-
-def r_targets(entry: Optional[float], stop: Optional[float], bias: str) -> Dict[str, Optional[float]]:
-    """
-    Simple R targets: 1R, 2R, 3R from entry based on stop distance.
-    """
-    out = {"T1_1R": None, "T2_2R": None, "T3_3R": None}
-    if entry is None or stop is None:
-        return out
-
-    if bias == "SHORT":
-        r = float(stop - entry)
-        if r <= 0:
-            return out
-        out["T1_1R"] = round(entry - 1.0 * r, 2)
-        out["T2_2R"] = round(entry - 2.0 * r, 2)
-        out["T3_3R"] = round(entry - 3.0 * r, 2)
-    else:
-        r = float(entry - stop)
-        if r <= 0:
-            return out
-        out["T1_1R"] = round(entry + 1.0 * r, 2)
-        out["T2_2R"] = round(entry + 2.0 * r, 2)
-        out["T3_3R"] = round(entry + 3.0 * r, 2)
-    return out
-
-def order_ticket_text(
-    ticker: str,
-    bias: str,
-    tf: Optional[str],
-    entry: Optional[float],
-    stop: Optional[float],
-    shares: Optional[int],
-    risk_dollars: Optional[float],
-    signal: str,
-    ready_tfs: str
-) -> str:
-    side = "BUY STOP" if bias != "SHORT" else "SELL STOP"
-    stop_side = "SELL STOP" if bias != "SHORT" else "BUY STOP"
-
-    if entry is None or stop is None or shares is None:
-        return (
-            f"{ticker} | {bias}\n"
-            f"Signal: {signal}\n"
-            f"Ready TFs: {ready_tfs}\n"
-            f"TF: {tf or 'n/a'}\n"
-            f"Not actionable yet: no Entry/Stop.\n"
-        )
-
-    rd = f"${risk_dollars:.2f}" if (risk_dollars is not None and math.isfinite(risk_dollars)) else "n/a"
-
-    return (
-        f"{ticker} | {bias}\n"
-        f"Signal: {signal}\n"
-        f"Ready TFs: {ready_tfs}\n"
-        f"TF: {tf or 'n/a'}\n\n"
-        f"ENTRY: {side} @ {entry:.2f} for {shares} sh\n"
-        f"STOP:  {stop_side} @ {stop:.2f} (risk ~ {rd})\n"
-        f"Plan: Use bracket/OTO if available.\n"
-    )
-
-# =========================
 # TRADE PLAN NOTES
 # =========================
 def pick_grade(strength: int, trend: str, rot: float, has_trigger: bool, rsi_val: float, pb_low: float, pb_high: float) -> str:
@@ -643,12 +487,10 @@ def atrp_bucket(atrp: Optional[float]) -> str:
 def targets_from_range(d: pd.DataFrame, entry: Optional[float], direction: str) -> Tuple[Optional[float], Optional[float]]:
     if d is None or d.empty or len(d) < 70:
         return None, None
-
     hi20 = float(d["High"].rolling(20).max().iloc[-1])
     lo20 = float(d["Low"].rolling(20).min().iloc[-1])
     hi63 = float(d["High"].rolling(63).max().iloc[-1])
     lo63 = float(d["Low"].rolling(63).min().iloc[-1])
-
     if direction == "LONG":
         return hi20, hi63
     else:
@@ -669,7 +511,6 @@ def trade_plan_notes(
     pb_high: float,
 ) -> Dict[str, str]:
     has_trigger = (entry is not None and stop is not None) and ("READY" in trigger_status)
-
     grade = pick_grade(strength, trend, rotation, has_trigger, rsi_val, pb_low, pb_high)
 
     if trend != "UP":
@@ -704,6 +545,7 @@ def trade_plan_notes(
 
     t1, t2 = targets_from_range(d_df, entry, "LONG")
     invalidation = "Invalidation = break below STOP (or close below if you trade close-based)."
+
     improve = []
     if trend != "UP":
         improve.append("Improve: reclaim and hold above your trend EMA + RS turns positive.")
@@ -770,7 +612,12 @@ def analyze_ticker(
     flags = compute_flags(d_tf, w_tf, m_tf)
 
     tf, entry, stop = best_trigger("LONG", d_tf, w_tf)
-    tstat = trigger_status_v2(flags, "LONG")
+
+    d_ready = bool(flags["D_Inside"] and entry is not None and stop is not None and tf == "D")
+    w_ready = bool(flags["W_Inside"] and entry is not None and stop is not None and tf == "W")
+    m_inside = bool(flags["M_Inside"])
+
+    trigger_status = f"D: {'READY' if d_ready else 'WAIT'} | W: {'READY' if w_ready else 'WAIT'} | M: {'INSIDE' if m_inside else '—'}"
 
     entry_r = None if entry is None else round(float(entry), 2)
     stop_r  = None if stop  is None else round(float(stop), 2)
@@ -788,14 +635,13 @@ def analyze_ticker(
     if flags["M_Bull"]: strat_note.append("Monthly: Bull")
     if flags["W_Bull"]: strat_note.append("Weekly: Bull")
     if flags["D_Bull"]: strat_note.append("Daily: Bull")
+    if flags["M_Inside"]: strat_note.append("Monthly: Inside Bar")
     if flags["W_Inside"]: strat_note.append("Weekly: Inside Bar")
     if flags["D_Inside"]: strat_note.append("Daily: Inside Bar")
     if flags["W_212Up"]: strat_note.append("Weekly: 2-1-2 Up")
     if flags["D_212Up"]: strat_note.append("Daily: 2-1-2 Up")
     if not strat_note:
         strat_note = ["No STRAT alignment flags currently"]
-
-    sig = signal_type(flags, "LONG")
 
     return {
         "Ticker": ticker.upper(),
@@ -806,12 +652,7 @@ def analyze_ticker(
         "Rotation": rot,
         "Strength": strength,
         "Meter": meter,
-        "Signal": sig,
-        "TriggerStatus": tstat["TriggerStatus"],
-        "Trigger_D": tstat["Trigger_D"],
-        "Trigger_W": tstat["Trigger_W"],
-        "Trigger_M": tstat["Trigger_M"],
-        "ReadyTimeframes": tstat["ReadyTimeframes"],
+        "TriggerStatus": trigger_status,
         "TF": tf,
         "Entry": entry_r,
         "Stop": stop_r,
@@ -821,18 +662,9 @@ def analyze_ticker(
         "DailyDF": d,
     }
 
-# =========================
-# UI BLOCKS
-# =========================
-def writeup_block(info: Dict, pb_low: float, pb_high: float, exec_settings: Dict) -> None:
+def writeup_block(info: Dict, pb_low: float, pb_high: float) -> None:
     t = info["Ticker"]
-    bias = exec_settings.get("bias_for_execution", "LONG")  # analyzer stays LONG-oriented
-    risk_dollars = float(exec_settings.get("risk_dollars", 200.0))
-    max_shares = int(exec_settings.get("max_shares", 5000))
-
     st.markdown(f"#### {t} — {info['Meter']} ({info['Strength']}/100)")
-    st.write(f"**Signal:** {info.get('Signal','n/a')}")
-    st.write(f"**Ready TFs:** {info.get('ReadyTimeframes','n/a')}")
 
     c1, c2, c3, c4 = st.columns(4)
     with c1: st.write(f"**Trend:** {info['Trend']}")
@@ -843,54 +675,11 @@ def writeup_block(info: Dict, pb_low: float, pb_high: float, exec_settings: Dict
     pb_ok = pullback_zone_ok(info["Trend"], info["RSI"], pb_low, pb_high)
     st.write(f"**Pullback Zone ({pb_low}-{pb_high}) OK?** {'✅ YES' if pb_ok else '❌ NO'}")
 
-    with st.expander("Trigger Status (Daily / Weekly / Monthly context)", expanded=True):
-        st.write(f"- **{info.get('Trigger_D','n/a')}**")
-        st.write(f"- **{info.get('Trigger_W','n/a')}**")
-        st.write(f"- **{info.get('Trigger_M','n/a')}**")
-        st.write(f"- **Headline:** {info.get('TriggerStatus','n/a')}")
-
     st.write(
         f"**Trigger:** {info['TriggerStatus']}"
         + (f" | TF: **{info['TF']}** | Entry: **{info['Entry']}** | Stop: **{info['Stop']}**" if info["Entry"] else "")
     )
 
-    # ===== Step 3: Execution / Sizing =====
-    sizing = position_sizing(bias, info.get("Entry"), info.get("Stop"), risk_dollars, max_shares)
-    targets_r = r_targets(info.get("Entry"), info.get("Stop"), bias)
-
-    st.markdown("### 🧾 Execution (Shares + Risk)")
-    e1, e2, e3, e4 = st.columns(4)
-    with e1:
-        st.metric("Risk $/trade", f"${risk_dollars:,.0f}")
-    with e2:
-        st.metric("Stop Dist", f"{sizing['StopDist']:.2f}" if sizing["StopDist"] is not None else "n/a")
-    with e3:
-        st.metric("Shares", f"{int(sizing['Shares'])}" if sizing["Shares"] is not None else "n/a")
-    with e4:
-        st.metric("$ Risk", f"${sizing['DollarRisk']:.2f}" if sizing["DollarRisk"] is not None else "n/a")
-
-    st.write(
-        f"**R Targets:** "
-        f"1R: {targets_r['T1_1R'] if targets_r['T1_1R'] is not None else 'n/a'} | "
-        f"2R: {targets_r['T2_2R'] if targets_r['T2_2R'] is not None else 'n/a'} | "
-        f"3R: {targets_r['T3_3R'] if targets_r['T3_3R'] is not None else 'n/a'}"
-    )
-
-    ticket = order_ticket_text(
-        ticker=t,
-        bias=bias,
-        tf=info.get("TF"),
-        entry=info.get("Entry"),
-        stop=info.get("Stop"),
-        shares=None if sizing["Shares"] is None else int(sizing["Shares"]),
-        risk_dollars=None if sizing["DollarRisk"] is None else float(sizing["DollarRisk"]),
-        signal=info.get("Signal","n/a"),
-        ready_tfs=info.get("ReadyTimeframes","n/a"),
-    )
-    with st.expander("📋 Order Ticket (copy/paste)", expanded=False):
-        st.code(ticket, language="text")
-
-    # Trade plan notes
     plan = trade_plan_notes(
         ticker=t,
         trend=info["Trend"],
@@ -928,70 +717,152 @@ def writeup_block(info: Dict, pb_low: float, pb_high: float, exec_settings: Dict
             st.write(f"- {s}")
 
 # =========================
-# PAGES
+# CHEAT SHEET PAGE (NEW)
 # =========================
 def show_strat_cheat_sheet():
-    st.title("📚 STRAT Signals Cheat Sheet (Scanner Edition) — V1.4 Step 3")
+    st.title("🧾 STRAT Signals Cheat Sheet (for THIS Scanner)")
+    st.caption("Actionable signals + exactly how this app labels them.")
+
     st.markdown("""
-### What This App Calls “Actionable”
-**Actionable = you have Entry + Stop + Position Size.**
+## 1) Candle Types (The STRAT Basics)
 
-#### A) Inside Bar Breakout / Breakdown ✅ (Primary Actionable Trigger)
-- **Long:** Buy stop above Inside Bar High
-- **Short:** Sell stop below Inside Bar Low
-- **Stop:** other side of Inside Bar
-- **Why:** clean risk definition + expansion potential
+**1 = Inside Bar**  
+- Current high ≤ prior high AND current low ≥ prior low  
+- Meaning: compression / coil / “pause”  
+- **In this app:** `D_Inside`, `W_Inside`, `M_Inside`
 
-#### B) 2-1-2 (Setup Context)
-- Great context, but still prefer an Inside Bar trigger for clean entry/stop.
+**2U = Two-Up**  
+- Current high > prior high AND low ≥ prior low  
+- Meaning: directional expansion up  
+- **In this app:** part of `D_Bull`, `W_Bull`, `M_Bull`
 
-#### C) Alignment (Monthly/Weekly)
-- This is a FILTER: “wind at your back.”
-- Not the entry.
+**2D = Two-Down**  
+- Current low < prior low AND high ≤ prior high  
+- Meaning: directional expansion down  
+- **In this app:** part of `D_Bear`, `W_Bear`, `M_Bear`
 
 ---
 
-### Step 3 Execution Layer (New)
-If Entry/Stop exist, the app now calculates:
-- Stop distance
-- Shares (based on your risk dollars)
-- Actual $ risk
-- 1R / 2R / 3R targets
-- Copy/paste order ticket
+## 2) Actionable Triggers (The Ones You Actually Place Orders On)
+
+### ✅ Inside Bar Break (Primary Trigger)
+**LONG:** buy stop above the Inside Bar HIGH  
+**STOP:** below the Inside Bar LOW  
+
+**SHORT:** sell stop below the Inside Bar LOW  
+**STOP:** above the Inside Bar HIGH  
+
+**In this app:**  
+- We compute triggers from the **best available Inside Bar** (Weekly first, then Daily)  
+- You’ll see:
+  - `D: READY / WAIT`
+  - `W: READY / WAIT`
+  - `M: INSIDE / —` (monthly inside exists, but we don't place monthly orders)
+
+**Rule of thumb:** Weekly triggers > Daily triggers.
+
+---
+
+## 3) The 2-1-2 Pattern (Continuation Setup)
+
+**2-1-2 Up:** a 2U, then an inside bar, then a 2U  
+**2-1-2 Down:** a 2D, then an inside bar, then a 2D  
+
+**In this app:**  
+- `D_212Up`, `W_212Up`  
+- `D_212Dn`, `W_212Dn`  
+
+**How to trade it (simple):**  
+- Trade it like an inside bar trigger **in the direction of the final 2**  
+- It’s basically “compression → expansion continuation.”
+
+---
+
+## 4) Alignment (Why Your Scanner Filters Work)
+
+**Monthly / Weekly Alignment = higher follow-through odds.**
+
+- For LONG bias, the scanner can require:
+  - Monthly Bull OR Weekly Bull  
+- For SHORT bias:
+  - Monthly Bear OR Weekly Bear  
+
+**In this app:** `Require Monthly OR Weekly alignment`
+
+---
+
+## 5) What “READY” Means Inside This App
+
+A ticker is **READY** when:
+- It has an Inside Bar **(Daily or Weekly)**  
+- The app can compute:
+  - **Entry** = IB break level  
+  - **Stop** = opposite side of the IB
+
+If there is no Inside Bar → you’ll see **WAIT** (and that’s correct).
+
+---
+
+## 6) How To Use This Tool Daily (2–5 minutes)
+
+1. **Dashboard:** Check **Market Grade**
+   - UP + A/B → prefer longs
+   - MIXED → smaller size / fewer trades
+2. **Rotation IN:** pick the strongest groups
+3. **Watchlist:** focus the top names
+4. Only trade tickers showing:
+   - **W: READY** (best)
+   - or **D: READY** (still valid)
+5. Execute:
+   - Stop order at Entry
+   - Hard stop at Stop
+   - Manage to T1 / T2 (20d/63d levels in write-up)
+
+---
+
+## 7) Quick Glossary (What you’ll see in tables)
+
+- **Strength** = leadership score (RS vs SPY + rotation + trend)
+- **Rotation** = RS(short) − RS(long) (money flowing in/out)
+- **Trend** = UP if price is above EMA and EMA rising
+- **TriggerStatus** = D/W/M readiness snapshot
 """)
 
+    st.info("Want it even tighter? Tell me your exact STRAT vocabulary list (RevStrat, actionable reversals, etc.) and I’ll add it as V1.4.2.")
+
+# =========================
+# USER GUIDE PAGE
+# =========================
 def show_user_guide():
-    st.title("📘 STRAT Regime Scanner — User Guide (V1.4.2)")
+    st.title("📘 STRAT Regime Scanner — Complete User Guide (V1.4.1)")
     st.markdown("""
-## What changed in V1.4 Step 3?
-You now get:
-- **Risk-based share sizing** (simple and reliable)
-- **$ risk + stop distance + shares** displayed wherever you have Entry/Stop
-- **1R/2R/3R targets**
-- **Copy/paste “Order Ticket”**
-- **CSV exports** for Watchlist + Scanner tables
+## What This Tool Does
+Market Bias → Rotation → Leaders → Pullback → Trigger → Execution.
 
-Core STRAT logic remains unchanged.
+If you have **no trigger**, you **wait**. That is the edge.
+
+Use the **Cheat Sheet** page for signal definitions.
 """)
 
+# =========================
+# MARKET DASHBOARD
+# =========================
 def show_market_dashboard():
-    st.title("📊 Market Dashboard (Sentiment • Rotation • Leaders • Watchlist) — V1.4.2")
-    st.caption("Now includes Step 3 execution sizing + order tickets + CSV export.")
+    st.title("📊 Market Dashboard (Sentiment • Market Grade • Rotation • Leaders • Watchlist) — V1.4.1")
+    st.caption("Strength meter is capped for stability. Watchlist write-ups include Trade Plan Notes.")
 
-    # ===== Step 3 Execution Settings (global-ish) =====
-    with st.expander("Execution Settings (Step 3)", expanded=True):
-        e1, e2, e3 = st.columns([1, 1, 2])
-        with e1:
-            risk_dollars = st.number_input("Risk $ per trade", min_value=10.0, max_value=5000.0, value=200.0, step=10.0)
-        with e2:
-            max_shares = st.number_input("Max shares cap", min_value=1, max_value=500000, value=5000, step=100)
-        with e3:
-            st.write("Tip: Risk sizing is **only** applied when the ticker has Entry + Stop (Inside Bar READY).")
-
-    exec_settings = {"risk_dollars": float(risk_dollars), "max_shares": int(max_shares), "bias_for_execution": "LONG"}
+    topbar = st.columns([1, 1, 6])
+    with topbar[0]:
+        if st.button("🧾 Cheat Sheet"):
+            goto_page("🧾 STRAT Cheat Sheet")
+            st.rerun()
+    with topbar[1]:
+        if st.button("Refresh data"):
+            st.cache_data.clear()
+            st.rerun()
 
     with st.expander("Dashboard Settings", expanded=True):
-        c1, c2, c3, c4, c5 = st.columns([1.1, 1.1, 1.1, 1.1, 1.2])
+        c1, c2, c3, c4 = st.columns(4)
         with c1:
             rs_short = st.selectbox("RS Lookback (short)", [21, 30, 42], index=0)
         with c2:
@@ -1000,10 +871,6 @@ def show_market_dashboard():
             ema_trend_len = st.selectbox("Trend EMA", [50, 100, 200], index=0)
         with c4:
             rsi_len = st.selectbox("RSI Length", [7, 14, 21], index=1)
-        with c5:
-            if st.button("Refresh data"):
-                st.cache_data.clear()
-                st.rerun()
 
     with st.expander("Today Watchlist Settings", expanded=True):
         w1, w2, w3, w4, w5 = st.columns([1, 1, 1, 1, 1.2])
@@ -1018,31 +885,77 @@ def show_market_dashboard():
         with w5:
             strict_pullback = st.checkbox("Strict pullback filter (only show RSI-in-zone)", value=False)
 
-    st.subheader("Overall Market Sentiment")
+    st.subheader("Overall Market Sentiment + Market Grade")
+
     market_syms = list(MARKET_ETFS.values()) + ["^VIX"]
-    mcols = st.columns(len(market_syms))
+    core_syms = ["SPY", "QQQ", "IWM", "DIA"]
 
-    for i, sym in enumerate(market_syms):
-        d = get_hist(sym)
-        if d.empty:
+    trend_map = {}
+    rsi_map = {}
+    ret_map = {}
+
+    left, right = st.columns([3, 1])
+
+    with left:
+        mcols = st.columns(len(market_syms))
+        for i, sym in enumerate(market_syms):
+            d = get_hist(sym)
+            if d.empty:
+                with mcols[i]:
+                    st.metric(sym, "n/a", "n/a")
+                continue
+
+            close = d["Close"].dropna()
+            if close.empty or len(close) < 10:
+                with mcols[i]:
+                    st.metric(sym, "n/a", "n/a")
+                continue
+
+            tr = trend_label(close, int(ema_trend_len))
+            r = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
+            ret = float(total_return(close, int(rs_short)).iloc[-1]) if len(close) > rs_short else np.nan
+
+            trend_map[sym] = tr
+            rsi_map[sym] = r
+            ret_map[sym] = ret
+
             with mcols[i]:
-                st.metric(sym, "n/a", "n/a")
-            continue
+                st.metric(sym, f"{close.iloc[-1]:.2f}", f"{(ret*100):.1f}%" if np.isfinite(ret) else "n/a")
+                st.write(f"Trend: **{tr}**")
+                st.write(f"RSI: **{r:.1f}**")
 
-        close = d["Close"].dropna()
-        if close.empty or len(close) < 10:
-            with mcols[i]:
-                st.metric(sym, "n/a", "n/a")
-            continue
+    with right:
+        ups = sum(1 for s in core_syms if trend_map.get(s) == "UP")
+        dns = sum(1 for s in core_syms if trend_map.get(s) != "UP")
 
-        tr = trend_label(close, int(ema_trend_len))
-        r = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
-        ret = float(total_return(close, int(rs_short)).iloc[-1]) if len(close) > rs_short else np.nan
+        rsi_vals = [rsi_map.get(s, 50.0) for s in core_syms if np.isfinite(rsi_map.get(s, np.nan))]
+        ret_vals = [ret_map.get(s, 0.0) for s in core_syms if np.isfinite(ret_map.get(s, np.nan))]
 
-        with mcols[i]:
-            st.metric(sym, f"{close.iloc[-1]:.2f}", f"{(ret*100):.1f}%" if np.isfinite(ret) else "n/a")
-            st.write(f"Trend: **{tr}**")
-            st.write(f"RSI: **{r:.1f}**")
+        avg_rsi = float(np.mean(rsi_vals)) if rsi_vals else 50.0
+        avg_ret = float(np.mean(ret_vals)) if ret_vals else 0.0
+
+        strength = int(np.clip(50 + (ups - dns) * 12 + (avg_rsi - 50) * 0.8 + (avg_ret * 100) * 0.6, 0, 100))
+
+        if ups >= 3:
+            overall_trend = "UP"
+        elif dns >= 3:
+            overall_trend = "DOWN"
+        else:
+            overall_trend = "MIXED"
+
+        if overall_trend in ("UP", "DOWN") and strength >= 70:
+            grade = "A"
+        elif strength >= 55:
+            grade = "B"
+        else:
+            grade = "C"
+
+        badge = "🟢" if overall_trend == "UP" else "🔴" if overall_trend == "DOWN" else "🟠"
+
+        st.markdown("### Market Grade")
+        st.write(f"**Trend:** {badge} **{overall_trend}**")
+        st.write(f"**Grade:** **{grade}**")
+        st.write(f"**Strength:** **{strength}/100**")
 
     spy_df = get_hist("SPY")
     if spy_df.empty:
@@ -1145,54 +1058,32 @@ def show_market_dashboard():
         st.warning("Watchlist is empty under current settings. Loosen pullback filter or increase scan sizes.")
         return
 
-    # Step 3: Add sizing columns to watchlist table
-    rows = []
-    for x in watchlist:
-        sizing = position_sizing("LONG", x.get("Entry"), x.get("Stop"), float(risk_dollars), int(max_shares))
-        rows.append({
-            "Group": x["Group"],
-            "Ticker": x["Ticker"],
-            "Signal": x.get("Signal", "n/a"),
-            "Ready TFs": x.get("ReadyTimeframes", "n/a"),
-            "Trigger": x.get("TriggerStatus", "n/a"),
-            "Strength": x["Strength"],
-            "Meter": x["Meter"],
-            "Trend": x["Trend"],
-            "RSI": x["RSI"],
-            f"RS vs SPY ({rs_short})": x["RS_short"],
-            "Rotation": x["Rotation"],
-            "TF": x["TF"],
-            "Entry": x["Entry"],
-            "Stop": x["Stop"],
-            "StopDist": sizing["StopDist"],
-            "Shares": sizing["Shares"],
-            "$Risk": sizing["DollarRisk"],
-        })
-
-    wdf = pd.DataFrame(rows).sort_values(["Strength","Rotation"], ascending=[False, False])
+    wdf = pd.DataFrame([{
+        "Group": x["Group"],
+        "Ticker": x["Ticker"],
+        "Strength": x["Strength"],
+        "Meter": x["Meter"],
+        "Trend": x["Trend"],
+        "RSI": x["RSI"],
+        f"RS vs SPY ({rs_short})": x["RS_short"],
+        "Rotation": x["Rotation"],
+        "Trigger": x["TriggerStatus"],
+        "TF": x["TF"],
+        "Entry": x["Entry"],
+        "Stop": x["Stop"],
+    } for x in watchlist]).sort_values(["Strength","Rotation"], ascending=[False, False])
 
     wstyled = (
         wdf.style
         .format({
             f"RS vs SPY ({rs_short})": "{:.2%}",
             "Rotation": "{:.2%}",
-            "RSI": "{:.1f}",
-            "StopDist": "{:.2f}",
-            "$Risk": "${:.2f}",
+            "RSI": "{:.1f}"
         })
         .applymap(meter_style, subset=["Meter"])
         .applymap(strength_style, subset=["Strength"])
     )
     st.dataframe(wstyled, use_container_width=True, hide_index=True, height=420)
-
-    # CSV download (watchlist)
-    st.download_button(
-        "⬇️ Download Watchlist CSV",
-        data=wdf.to_csv(index=False).encode("utf-8"),
-        file_name=f"watchlist_{datetime.now().strftime('%Y%m%d')}.csv",
-        mime="text/csv",
-        use_container_width=True
-    )
 
     st.write("### 📌 Watchlist Write-ups (click to expand)")
     for rec in wdf.head(20).to_dict("records"):
@@ -1200,8 +1091,8 @@ def show_market_dashboard():
         if full is None:
             continue
         full["Group"] = rec["Group"]
-        with st.expander(f"{full['Group']} — {full['Ticker']} | {full['Signal']} | {full['ReadyTimeframes']} | {full['Meter']} {full['Strength']}/100 | {full['TriggerStatus']}"):
-            writeup_block(full, pb_low, pb_high, exec_settings)
+        with st.expander(f"{full['Group']} — {full['Ticker']} | {full['Meter']} {full['Strength']}/100 | {full['TriggerStatus']}"):
+            writeup_block(full, pb_low, pb_high)
 
     st.subheader("🔎 Quick Ticker Search (Why is this a candidate?)")
     q = st.text_input("Type a ticker:", value="AAPL")
@@ -1210,20 +1101,24 @@ def show_market_dashboard():
         if info is None:
             st.warning("No data returned (bad ticker or yfinance empty). Try another symbol.")
         else:
-            writeup_block(info, pb_low, pb_high, exec_settings)
+            writeup_block(info, pb_low, pb_high)
 
+# =========================
+# TICKER ANALYZER
+# =========================
 def show_ticker_analyzer():
-    st.title("🔎 Ticker Analyzer — Score + STRAT Context + Execution (V1.4.2)")
-    st.caption("Step 3 adds shares sizing + order ticket when Entry/Stop exist.")
+    st.title("🔎 Ticker Analyzer — Explain the Score + STRAT Context + Trade Plan Notes (V1.4.1)")
+    st.caption("Type any ticker and get a swing-trader style gameplan automatically.")
 
-    with st.expander("Execution Settings (Step 3)", expanded=True):
-        e1, e2 = st.columns([1, 1])
-        with e1:
-            risk_dollars = st.number_input("Risk $ per trade", min_value=10.0, max_value=5000.0, value=200.0, step=10.0, key="ta_risk")
-        with e2:
-            max_shares = st.number_input("Max shares cap", min_value=1, max_value=500000, value=5000, step=100, key="ta_maxsh")
-
-    exec_settings = {"risk_dollars": float(risk_dollars), "max_shares": int(max_shares), "bias_for_execution": "LONG"}
+    topbar = st.columns([1, 1, 6])
+    with topbar[0]:
+        if st.button("🧾 Cheat Sheet"):
+            goto_page("🧾 STRAT Cheat Sheet")
+            st.rerun()
+    with topbar[1]:
+        if st.button("Refresh data"):
+            st.cache_data.clear()
+            st.rerun()
 
     with st.expander("Analyzer Settings", expanded=True):
         c1, c2, c3, c4, c5 = st.columns([1.1, 1.1, 1.1, 1.1, 1.2])
@@ -1259,7 +1154,7 @@ def show_ticker_analyzer():
         if info is None:
             st.warning("No data returned (bad ticker or yfinance empty). Try another symbol.")
         else:
-            writeup_block(info, pb_low, pb_high, exec_settings)
+            writeup_block(info, pb_low, pb_high)
 
 # =========================
 # SCANNER
@@ -1366,15 +1261,18 @@ def calc_scores(
     return setup, mag, total
 
 def show_scanner():
-    st.title("STRAT Regime Scanner (Auto LONG/SHORT + Magnitude) — V1.4.2")
-    st.caption("Step 3: Adds share sizing + $ risk + R targets + CSV export. Core logic unchanged.")
+    st.title("STRAT Regime Scanner (Auto LONG/SHORT + Magnitude) — V1.4.1")
+    st.caption("Bias from market regime. Ranks tickers by setup quality AND magnitude (RR + ATR% + compression).")
 
-    with st.expander("Execution Settings (Step 3)", expanded=True):
-        e1, e2 = st.columns([1, 1])
-        with e1:
-            risk_dollars = st.number_input("Risk $ per trade", min_value=10.0, max_value=5000.0, value=200.0, step=10.0, key="sc_risk")
-        with e2:
-            max_shares = st.number_input("Max shares cap", min_value=1, max_value=500000, value=5000, step=100, key="sc_maxsh")
+    topbar = st.columns([1, 1, 6])
+    with topbar[0]:
+        if st.button("🧾 Cheat Sheet"):
+            goto_page("🧾 STRAT Cheat Sheet")
+            st.rerun()
+    with topbar[1]:
+        if st.button("Refresh data"):
+            st.cache_data.clear()
+            st.rerun()
 
     with st.expander("Filters", expanded=True):
         colA, colB, colC, colD = st.columns([1.1, 1.2, 1.6, 1.1])
@@ -1387,12 +1285,6 @@ def show_scanner():
             require_alignment = st.checkbox("Require Monthly OR Weekly alignment (bias direction)", value=True)
         with colD:
             top_k = st.slider("Top Picks count", min_value=3, max_value=8, value=5)
-
-        colR1, _ = st.columns([1, 3])
-        with colR1:
-            if st.button("Refresh data"):
-                st.cache_data.clear()
-                st.rerun()
 
     st.caption(f"Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
 
@@ -1471,8 +1363,8 @@ def show_scanner():
     tickers = SECTOR_TICKERS.get(sector_choice, [])
     st.write(f"Selected: **{sector_choice}** ({SECTOR_ETFS.get(sector_choice,'')}) — tickers in list: **{len(tickers)}**")
 
-    scan_n = st.slider("How many tickers to scan", min_value=1, max_value=max(1, len(tickers)), value=min(15, len(tickers)) if tickers else 1)
-    scan_list = tickers[:scan_n] if tickers else []
+    scan_n = st.slider("How many tickers to scan", min_value=1, max_value=max(1, len(tickers)), value=min(15, len(tickers)))
+    scan_list = tickers[:scan_n]
 
     cand_rows: List[Dict] = []
     for t in scan_list:
@@ -1501,32 +1393,21 @@ def show_scanner():
         rr, atrp, room, compression = magnitude_metrics(eff_bias, d_tf, entry, stop)
         setup_score, mag_score, total_score = calc_scores(eff_bias, flags, rr, atrp, compression, entry, stop)
 
-        sig = signal_type(flags, eff_bias)
-        tstat = trigger_status_v2(flags, eff_bias)
+        d_ready = bool(flags["D_Inside"] and tf == "D" and entry is not None and stop is not None)
+        w_ready = bool(flags["W_Inside"] and tf == "W" and entry is not None and stop is not None)
+        m_inside = bool(flags["M_Inside"])
 
-        entry_r = None if entry is None else round(float(entry), 2)
-        stop_r  = None if stop  is None else round(float(stop), 2)
-
-        sizing = position_sizing(eff_bias, entry_r, stop_r, float(risk_dollars), int(max_shares))
-        targets = r_targets(entry_r, stop_r, eff_bias)
+        trigger_status = f"D: {'READY' if d_ready else 'WAIT'} | W: {'READY' if w_ready else 'WAIT'} | M: {'INSIDE' if m_inside else '—'}"
 
         cand = {
             "Ticker": t,
-            "Signal": sig,
-            "Ready TFs": tstat["ReadyTimeframes"],
-            "TriggerStatus": tstat["TriggerStatus"],
+            "TriggerStatus": trigger_status,
             "SetupScore": setup_score,
             "MagScore": mag_score,
             "TotalScore": total_score,
             "TF": tf,
-            "Entry": entry_r,
-            "Stop": stop_r,
-            "StopDist": sizing["StopDist"],
-            "Shares": sizing["Shares"],
-            "$Risk": sizing["DollarRisk"],
-            "T1(1R)": targets["T1_1R"],
-            "T2(2R)": targets["T2_2R"],
-            "T3(3R)": targets["T3_3R"],
+            "Entry": None if entry is None else round(float(entry), 2),
+            "Stop": None if stop is None else round(float(stop), 2),
             "Room": None if room is None else round(float(room), 2),
             "RR": None if rr is None else round(float(rr), 2),
             "ATR%": None if atrp is None else round(float(atrp), 2),
@@ -1542,36 +1423,29 @@ def show_scanner():
 
         st.markdown(f"### Top Trade Ideas (best {top_k}) — Bias: **{bias}** (ranked by TotalScore)")
         top_df = cand_df.head(top_k)[[
-            "Ticker","Signal","Ready TFs","TriggerStatus","TotalScore","TF","Entry","Stop","StopDist","Shares","$Risk","T1(1R)","T2(2R)","T3(3R)","RR","ATR%"
+            "Ticker","TriggerStatus","TotalScore","SetupScore","MagScore","TF","Entry","Stop","Room","RR","ATR%",
+            "W_212Up","D_212Up","M_Bull","W_Bull","D_Bull","W_Inside","D_Inside",
+            "W_212Dn","D_212Dn","M_Bear","W_Bear","D_Bear"
         ]]
         st.dataframe(top_df, use_container_width=True, hide_index=True)
 
-        st.download_button(
-            "⬇️ Download Scanner CSV",
-            data=cand_df.to_csv(index=False).encode("utf-8"),
-            file_name=f"scanner_{sector_choice.replace(' ','_')}_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
-
         st.markdown("### 🎯 Trade of the Day (best TotalScore + valid trigger)")
-        valid = cand_df.dropna(subset=["Entry","Stop","RR","Shares"]).copy()
+        valid = cand_df.dropna(subset=["Entry","Stop","RR"]).copy()
         valid = valid[valid["RR"] >= 2.0]
         if valid.empty:
             st.warning("No valid trigger found (needs Inside Bar levels). Use Top Ideas and wait for an Inside Bar trigger.")
         else:
             best = valid.iloc[0]
             st.success(
-                f"**{best['Ticker']}** | Bias: **{bias}** | Signal: **{best['Signal']}** | Ready: **{best['Ready TFs']}** | "
-                f"TF: **{best['TF']}** | Entry: **{best['Entry']}** | Stop: **{best['Stop']}** | "
-                f"Shares: **{int(best['Shares'])}** | $Risk: **${best['$Risk']:.2f}** | "
-                f"1R/2R/3R: **{best['T1(1R)']} / {best['T2(2R)']} / {best['T3(3R)']}**"
+                f"**{best['Ticker']}** | Bias: **{bias}** | TF: **{best['TF']}** | "
+                f"Entry: **{best['Entry']}** | Stop: **{best['Stop']}** | "
+                f"RR: **{best['RR']}** | ATR%: **{best['ATR%']}**"
             )
 
         st.markdown("### All Matches (ranked by TotalScore)")
         st.dataframe(
             cand_df[[
-                "Ticker","Signal","Ready TFs","TriggerStatus","TotalScore","TF","Entry","Stop","StopDist","Shares","$Risk","T1(1R)","T2(2R)","T3(3R)","RR","ATR%",
+                "Ticker","TriggerStatus","SetupScore","MagScore","TotalScore","TF","Entry","Stop","Room","RR","ATR%",
                 "W_Inside","D_Inside","W_212Up","D_212Up","W_212Dn","D_212Dn",
                 "M_Bull","W_Bull","D_Bull","M_Bear","W_Bear","D_Bear"
             ]],
@@ -1580,13 +1454,6 @@ def show_scanner():
         )
 
     st.subheader("Quick Market Read")
-
-    if bias in ("LONG", "SHORT"):
-        rotation_in = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.head(3).iterrows()]
-        rotation_out = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.tail(3).iterrows()]
-    else:
-        rotation_in, rotation_out = [], []
-
     if bias == "MIXED" or strength < 50:
         plan = "Plan: Defensive. Trade smaller, or wait for A+ triggers."
         badge = "🟠"
@@ -1602,32 +1469,23 @@ def show_scanner():
         f"Strength: **{strength}/100** | "
         f"Bull–Bear diff: **{bull_bear_diff}**"
     )
-
-    if rotation_in:
-        st.write("### Rotation IN")
-        st.write(", ".join(rotation_in))
-
-    if rotation_out:
-        st.write("### Rotation OUT")
-        st.write(", ".join(rotation_out))
-
     st.success(plan)
-    st.caption(
-        "Trigger logic: LONG = break of Inside Bar high / stop below low. "
-        "SHORT = break of Inside Bar low / stop above high. Weekly triggers preferred."
-    )
 
 # =========================
 # SIDEBAR NAV
 # =========================
 st.sidebar.title("Navigation")
+
 show_market_dash = st.sidebar.toggle("Enable Market Dashboard", value=True)
 
-pages = ["Scanner", "📘 User Guide", "🔎 Ticker Analyzer", "📚 STRAT Signals Cheat Sheet"]
-if show_market_dash:
+pages = ["Scanner", "📘 User Guide", "🔎 Ticker Analyzer", "🧾 STRAT Cheat Sheet"]
+if not show_market_dash:
+    # remove dashboard if disabled
+    pass
+else:
     pages.insert(1, "📊 Market Dashboard")
 
-page = st.sidebar.radio("Go to", pages)
+page = page_selector(pages, default="Scanner")
 st.sidebar.caption(f"Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
 
 # =========================
@@ -1639,7 +1497,7 @@ elif page == "📊 Market Dashboard":
     show_market_dashboard()
 elif page == "🔎 Ticker Analyzer":
     show_ticker_analyzer()
-elif page == "📚 STRAT Signals Cheat Sheet":
+elif page == "🧾 STRAT Cheat Sheet":
     show_strat_cheat_sheet()
 else:
     show_scanner()
