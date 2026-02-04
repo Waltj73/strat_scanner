@@ -1,19 +1,22 @@
-# app.py — STRAT Regime Scanner V1.4.0 (Step 1: Signal Type Engine)
+# app.py — STRAT Regime Scanner V1.4.1 (Step 2: Better Trigger Status + Timeframe Readiness)
 # Includes:
 # - Scanner (STRAT regime + triggers + ranking)
-# - Market Dashboard (sentiment + sector rotation + strength leaders)
-# - Today Watchlist Builder (#5)
-# - Ticker Analyzer (search + explain scoring + STRAT trigger context)
-# - Trade Plan Notes (A/B/C grade, targets, invalidation, improve notes)
+# - Market Dashboard (sentiment + sector rotation + strength leaders + watchlist)
+# - Today Watchlist Builder
+# - Ticker Analyzer (explain scoring + STRAT context)
+# - Trade Plan Notes
 #
 # =========================
-# V1.4 STEP 1 CHANGES (SAFE)
+# V1.4 STEP 2 CHANGES (SAFE)
 # =========================
-# ✅ Added "Signal" (human-readable) everywhere:
-#   - Scanner tables
-#   - Watchlist tables
-#   - Analyzer writeups
-# ✅ No breaking changes to existing scoring, triggers, or data fetch.
+# ✅ Adds "TriggerStatus" upgrade:
+#   - TriggerStatus = combined headline (READY / WAIT)
+#   - Trigger_D = Daily readiness label
+#   - Trigger_W = Weekly readiness label
+#   - Trigger_M = Monthly readiness label (Inside-bar only if you want it; default shows alignment status)
+# ✅ Adds "ReadyTimeframes" summary like: "D ✅ | W ✅ | M ⚪"
+# ✅ Adds a "📚 STRAT Signals Cheat Sheet" page (no impact on scanner logic)
+# ✅ No rewiring of scoring, RS, rotation, or existing filters. Low-risk.
 
 import math
 from datetime import datetime, timezone
@@ -27,7 +30,7 @@ import yfinance as yf
 # =========================
 # STREAMLIT CONFIG
 # =========================
-st.set_page_config(page_title="STRAT Regime Scanner V1.4.0", layout="wide")
+st.set_page_config(page_title="STRAT Regime Scanner V1.4.1", layout="wide")
 
 # =========================
 # UNIVERSE
@@ -254,8 +257,8 @@ def clamp_rs(x, lo, hi):
     except Exception:
         return 0.0
 
-RS_CAP = 0.10      # ±10% cap for RS vs SPY
-ROT_CAP = 0.08     # ±8% cap for Rotation
+RS_CAP = 0.10
+ROT_CAP = 0.08
 
 def strength_meter(rs_short_v: float, rotation_v: float, trend: str) -> int:
     rs_short_v = clamp_rs(rs_short_v, -RS_CAP, RS_CAP)
@@ -307,7 +310,7 @@ def pullback_zone_ok(trend: str, rsi_val: float, pb_low: float, pb_high: float) 
     return (pb_low <= rsi_val <= pb_high)
 
 # =========================
-# STRAT HELPERS (Scanner + Analyzer)
+# STRAT HELPERS
 # =========================
 def is_inside_bar(cur: pd.Series, prev: pd.Series) -> bool:
     return (cur["High"] <= prev["High"]) and (cur["Low"] >= prev["Low"])
@@ -447,13 +450,9 @@ def best_trigger(bias: str, d: pd.DataFrame, w: pd.DataFrame) -> Tuple[Optional[
     return None, None, None
 
 # =========================
-# V1.4 STEP 1 — SIGNAL TYPE ENGINE (NEW)
+# V1.4 STEP 1 — SIGNAL TYPE
 # =========================
 def signal_type(flags: Dict[str, bool], bias: str) -> str:
-    """
-    Human-readable setup label for the scanner.
-    Priority: Inside Bar (W/D) -> 2-1-2 (W/D) -> Alignment -> None
-    """
     if bias == "SHORT":
         if flags.get("W_Inside", False):
             return "Weekly Inside Breakdown"
@@ -467,7 +466,6 @@ def signal_type(flags: Dict[str, bool], bias: str) -> str:
             return "Bear Continuation (Alignment)"
         return "No Clean STRAT Setup"
     else:
-        # default LONG (and MIXED treated as LONG here)
         if flags.get("W_Inside", False):
             return "Weekly Inside Breakout"
         if flags.get("D_Inside", False):
@@ -479,6 +477,47 @@ def signal_type(flags: Dict[str, bool], bias: str) -> str:
         if flags.get("M_Bull", False) or flags.get("W_Bull", False):
             return "Bull Continuation (Alignment)"
         return "No Clean STRAT Setup"
+
+# =========================
+# V1.4 STEP 2 — BETTER TRIGGER STATUS (NEW)
+# =========================
+def _tf_icon(ok: bool, neutral: bool = False) -> str:
+    if neutral:
+        return "⚪"
+    return "✅" if ok else "❌"
+
+def trigger_status_v2(flags: Dict[str, bool], bias: str) -> Dict[str, str]:
+    """
+    Breaks trigger readiness into:
+      - Trigger_D: Daily Inside Bar ready?
+      - Trigger_W: Weekly Inside Bar ready?
+      - Trigger_M: Monthly alignment status (bull/bear) (safe and useful)
+      - ReadyTimeframes: compact summary (D/W/M)
+      - TriggerStatus: headline READY if D or W has Inside Bar, else WAIT
+    """
+    d_ready = bool(flags.get("D_Inside", False))
+    w_ready = bool(flags.get("W_Inside", False))
+
+    # "Monthly readiness" in practice is alignment, not inside bar.
+    # We show it clearly so you *know* the higher timeframe context.
+    if bias == "SHORT":
+        m_align = bool(flags.get("M_Bear", False))
+        m_label = "M: Bear Align" if m_align else "M: Not Bear Align"
+    else:
+        m_align = bool(flags.get("M_Bull", False))
+        m_label = "M: Bull Align" if m_align else "M: Not Bull Align"
+
+    headline = "READY" if (d_ready or w_ready) else "WAIT (No Inside Bar)"
+
+    ready_tf = f"D {_tf_icon(d_ready)} | W {_tf_icon(w_ready)} | M {_tf_icon(m_align)}"
+    return {
+        "TriggerStatus": headline,
+        "Trigger_D": "D: Inside Bar ✅" if d_ready else "D: No Inside Bar ❌",
+        "Trigger_W": "W: Inside Bar ✅" if w_ready else "W: No Inside Bar ❌",
+        "Trigger_M": m_label + (" ✅" if m_align else " ❌"),
+        "ReadyTimeframes": ready_tf,
+        "HasTrigger": "YES" if (d_ready or w_ready) else "NO",
+    }
 
 # =========================
 # TRADE PLAN NOTES
@@ -638,9 +677,11 @@ def analyze_ticker(
     d_tf, w_tf, m_tf = tf_frames(d)
     flags = compute_flags(d_tf, w_tf, m_tf)
 
-    # Analyzer remains LONG-oriented in this version (your current design)
+    # Analyzer stays LONG oriented (your current design)
     tf, entry, stop = best_trigger("LONG", d_tf, w_tf)
-    trigger_status = "READY" if (flags["W_Inside"] or flags["D_Inside"]) else "WAIT (No Inside Bar)"
+
+    # Step 2: upgraded trigger status
+    tstat = trigger_status_v2(flags, "LONG")
 
     entry_r = None if entry is None else round(float(entry), 2)
     stop_r  = None if stop  is None else round(float(stop), 2)
@@ -676,8 +717,13 @@ def analyze_ticker(
         "Rotation": rot,
         "Strength": strength,
         "Meter": meter,
-        "Signal": sig,  # NEW
-        "TriggerStatus": trigger_status,
+        "Signal": sig,
+        # Step 2 trigger fields
+        "TriggerStatus": tstat["TriggerStatus"],
+        "Trigger_D": tstat["Trigger_D"],
+        "Trigger_W": tstat["Trigger_W"],
+        "Trigger_M": tstat["Trigger_M"],
+        "ReadyTimeframes": tstat["ReadyTimeframes"],
         "TF": tf,
         "Entry": entry_r,
         "Stop": stop_r,
@@ -691,6 +737,7 @@ def writeup_block(info: Dict, pb_low: float, pb_high: float) -> None:
     t = info["Ticker"]
     st.markdown(f"#### {t} — {info['Meter']} ({info['Strength']}/100)")
     st.write(f"**Signal:** {info.get('Signal','n/a')}")
+    st.write(f"**Ready TFs:** {info.get('ReadyTimeframes','n/a')}")
 
     c1, c2, c3, c4 = st.columns(4)
     with c1: st.write(f"**Trend:** {info['Trend']}")
@@ -700,6 +747,13 @@ def writeup_block(info: Dict, pb_low: float, pb_high: float) -> None:
 
     pb_ok = pullback_zone_ok(info["Trend"], info["RSI"], pb_low, pb_high)
     st.write(f"**Pullback Zone ({pb_low}-{pb_high}) OK?** {'✅ YES' if pb_ok else '❌ NO'}")
+
+    # Step 2: show per-timeframe readiness
+    with st.expander("Trigger Status (Daily / Weekly / Monthly context)", expanded=True):
+        st.write(f"- **{info.get('Trigger_D','n/a')}**")
+        st.write(f"- **{info.get('Trigger_W','n/a')}**")
+        st.write(f"- **{info.get('Trigger_M','n/a')}**")
+        st.write(f"- **Headline:** {info.get('TriggerStatus','n/a')}")
 
     st.write(
         f"**Trigger:** {info['TriggerStatus']}"
@@ -745,25 +799,69 @@ def writeup_block(info: Dict, pb_low: float, pb_high: float) -> None:
 # =========================
 # PAGES
 # =========================
-def show_user_guide():
-    st.title("📘 STRAT Regime Scanner — Complete User Guide (V1.4 Step 1)")
+def show_strat_cheat_sheet():
+    st.title("📚 STRAT Signals Cheat Sheet (Scanner Edition) — V1.4 Step 2")
     st.markdown("""
-## What changed in V1.4 Step 1?
-You now get a **Signal** label (human readable) like:
+### The Only Signals This App Treats as “Actionable”
+This scanner is built around **clean, repeatable, “do I have an entry + stop?” setups.**
 
-- Weekly Inside Breakout
-- Daily Inside Breakout
-- Weekly 2-1-2 Continuation (Up)
-- Bull Continuation (Alignment)
+#### 1) Inside Bar Breakout / Breakdown (ACTIONABLE)
+- **What you see in the app:**  
+  - `W: Inside Bar ✅` or `D: Inside Bar ✅`
+  - `TriggerStatus: READY`
+- **Long trigger:** Buy stop **above Inside Bar High**  
+- **Stop:** Below Inside Bar Low  
+- **Why it’s king:** Defines risk cleanly and tends to expand.
 
-This removes the need to interpret raw STRAT flags.
+#### 2) 2-1-2 Continuation (SETUP CONTEXT)
+- **What you see:** “Weekly 2-1-2 Continuation (Up)” or “Daily 2-1-2 Continuation (Up)”
+- **Translation:** Trend is trying to continue, but you still want a clean trigger (often an inside bar forms next).
 
-Everything else behaves the same.
+#### 3) Alignment (Monthly/Weekly) (FILTER)
+- **What you see:** `M: Bull Align ✅` (or Bear Align in SHORT mode)
+- **Translation:** Higher timeframe is with you. This is NOT the entry; it’s the “wind at your back.”
+
+---
+
+### How to Use This In Real Trading (2-Minute Flow)
+1) **Start with Scanner bias** (LONG/SHORT/MIXED)  
+2) Pick a strong group  
+3) Only take trades where:
+   - `TriggerStatus = READY` (D or W inside bar)
+   - and you like the higher timeframe context (`M: Bull Align ✅` ideally)
+4) Place the order:
+   - Stop order at Entry
+   - Hard stop at Stop
+
+---
+
+### What “Ready TFs” Means
+Example: `D ✅ | W ❌ | M ✅`
+- **Daily is ready now**
+- Weekly isn’t set up
+- Monthly alignment is supportive
+
+That’s exactly what you asked for: *day, week, month readiness in one line.*
+""")
+
+def show_user_guide():
+    st.title("📘 STRAT Regime Scanner — User Guide (V1.4.1)")
+    st.markdown("""
+## What changed in V1.4 Step 2?
+You now get:
+- **Ready TFs** summary (Daily / Weekly / Monthly context)
+- Separate trigger labels:
+  - **Trigger_D**
+  - **Trigger_W**
+  - **Trigger_M**
+- A built-in **STRAT Signals Cheat Sheet** page.
+
+Your core scoring + filtering stays the same.
 """)
 
 def show_market_dashboard():
-    st.title("📊 Market Dashboard (Sentiment • Rotation • Leaders • Watchlist) — V1.4.0")
-    st.caption("Strength meter is capped for stability. Write-ups include Trade Plan Notes + Signal label.")
+    st.title("📊 Market Dashboard (Sentiment • Rotation • Leaders • Watchlist) — V1.4.1")
+    st.caption("Now includes upgraded Trigger Status + Ready TFs + Signal labels.")
 
     with st.expander("Dashboard Settings", expanded=True):
         c1, c2, c3, c4, c5 = st.columns([1.1, 1.1, 1.1, 1.1, 1.2])
@@ -923,14 +1021,15 @@ def show_market_dashboard():
     wdf = pd.DataFrame([{
         "Group": x["Group"],
         "Ticker": x["Ticker"],
-        "Signal": x.get("Signal", "n/a"),  # NEW
+        "Signal": x.get("Signal", "n/a"),
+        "Ready TFs": x.get("ReadyTimeframes", "n/a"),
+        "Trigger": x.get("TriggerStatus", "n/a"),
         "Strength": x["Strength"],
         "Meter": x["Meter"],
         "Trend": x["Trend"],
         "RSI": x["RSI"],
         f"RS vs SPY ({rs_short})": x["RS_short"],
         "Rotation": x["Rotation"],
-        "Trigger": x["TriggerStatus"],
         "TF": x["TF"],
         "Entry": x["Entry"],
         "Stop": x["Stop"],
@@ -954,7 +1053,7 @@ def show_market_dashboard():
         if full is None:
             continue
         full["Group"] = rec["Group"]
-        with st.expander(f"{full['Group']} — {full['Ticker']} | {full['Signal']} | {full['Meter']} {full['Strength']}/100 | {full['TriggerStatus']}"):
+        with st.expander(f"{full['Group']} — {full['Ticker']} | {full['Signal']} | {full['ReadyTimeframes']} | {full['Meter']} {full['Strength']}/100 | {full['TriggerStatus']}"):
             writeup_block(full, pb_low, pb_high)
 
     st.subheader("🔎 Quick Ticker Search (Why is this a candidate?)")
@@ -967,8 +1066,8 @@ def show_market_dashboard():
             writeup_block(info, pb_low, pb_high)
 
 def show_ticker_analyzer():
-    st.title("🔎 Ticker Analyzer — Explain the Score + STRAT Context + Trade Plan Notes (V1.4.0)")
-    st.caption("Type any ticker and get a swing-trader style gameplan automatically (now includes Signal label).")
+    st.title("🔎 Ticker Analyzer — Score + STRAT Context + Trigger Readiness (V1.4.1)")
+    st.caption("Now includes per-timeframe trigger readiness (D/W) and monthly alignment context (M).")
 
     with st.expander("Analyzer Settings", expanded=True):
         c1, c2, c3, c4, c5 = st.columns([1.1, 1.1, 1.1, 1.1, 1.2])
@@ -1007,7 +1106,7 @@ def show_ticker_analyzer():
             writeup_block(info, pb_low, pb_high)
 
 # =========================
-# SCANNER (UNCHANGED CORE)
+# SCANNER
 # =========================
 def magnitude_metrics(
     bias: str,
@@ -1111,8 +1210,8 @@ def calc_scores(
     return setup, mag, total
 
 def show_scanner():
-    st.title("STRAT Regime Scanner (Auto LONG/SHORT + Magnitude) — V1.4.0")
-    st.caption("Bias from market regime. Now includes human-readable Signal labels (Step 1).")
+    st.title("STRAT Regime Scanner (Auto LONG/SHORT + Magnitude) — V1.4.1")
+    st.caption("Step 2: Better Trigger Status (Daily/Weekly readiness + Monthly alignment context).")
 
     with st.expander("Filters", expanded=True):
         colA, colB, colC, colD = st.columns([1.1, 1.2, 1.6, 1.1])
@@ -1239,13 +1338,17 @@ def show_scanner():
         rr, atrp, room, compression = magnitude_metrics(eff_bias, d_tf, entry, stop)
         setup_score, mag_score, total_score = calc_scores(eff_bias, flags, rr, atrp, compression, entry, stop)
 
-        trigger_status = "READY" if (flags["W_Inside"] or flags["D_Inside"]) else "WAIT (No Inside Bar)"
-        sig = signal_type(flags, eff_bias)  # NEW
+        sig = signal_type(flags, eff_bias)
+        tstat = trigger_status_v2(flags, eff_bias)
 
         cand = {
             "Ticker": t,
-            "Signal": sig,  # NEW
-            "TriggerStatus": trigger_status,
+            "Signal": sig,
+            "Ready TFs": tstat["ReadyTimeframes"],
+            "TriggerStatus": tstat["TriggerStatus"],
+            "Trigger_D": tstat["Trigger_D"],
+            "Trigger_W": tstat["Trigger_W"],
+            "Trigger_M": tstat["Trigger_M"],
             "SetupScore": setup_score,
             "MagScore": mag_score,
             "TotalScore": total_score,
@@ -1267,7 +1370,7 @@ def show_scanner():
 
         st.markdown(f"### Top Trade Ideas (best {top_k}) — Bias: **{bias}** (ranked by TotalScore)")
         top_df = cand_df.head(top_k)[[
-            "Ticker","Signal","TriggerStatus","TotalScore","SetupScore","MagScore","TF","Entry","Stop","Room","RR","ATR%",
+            "Ticker","Signal","Ready TFs","TriggerStatus","TotalScore","SetupScore","MagScore","TF","Entry","Stop","Room","RR","ATR%",
             "W_212Up","D_212Up","M_Bull","W_Bull","D_Bull","W_Inside","D_Inside",
             "W_212Dn","D_212Dn","M_Bear","W_Bear","D_Bear"
         ]]
@@ -1281,15 +1384,15 @@ def show_scanner():
         else:
             best = valid.iloc[0]
             st.success(
-                f"**{best['Ticker']}** | Bias: **{bias}** | Signal: **{best['Signal']}** | TF: **{best['TF']}** | "
-                f"Entry: **{best['Entry']}** | Stop: **{best['Stop']}** | "
+                f"**{best['Ticker']}** | Bias: **{bias}** | Signal: **{best['Signal']}** | Ready: **{best['Ready TFs']}** | "
+                f"TF: **{best['TF']}** | Entry: **{best['Entry']}** | Stop: **{best['Stop']}** | "
                 f"RR: **{best['RR']}** | ATR%: **{best['ATR%']}**"
             )
 
         st.markdown("### All Matches (ranked by TotalScore)")
         st.dataframe(
             cand_df[[
-                "Ticker","Signal","TriggerStatus","SetupScore","MagScore","TotalScore","TF","Entry","Stop","Room","RR","ATR%",
+                "Ticker","Signal","Ready TFs","TriggerStatus","SetupScore","MagScore","TotalScore","TF","Entry","Stop","Room","RR","ATR%",
                 "W_Inside","D_Inside","W_212Up","D_212Up","W_212Dn","D_212Dn",
                 "M_Bull","W_Bull","D_Bull","M_Bear","W_Bear","D_Bear"
             ]],
@@ -1341,7 +1444,7 @@ def show_scanner():
 st.sidebar.title("Navigation")
 show_market_dash = st.sidebar.toggle("Enable Market Dashboard", value=True)
 
-pages = ["Scanner", "📘 User Guide", "🔎 Ticker Analyzer"]
+pages = ["Scanner", "📘 User Guide", "🔎 Ticker Analyzer", "📚 STRAT Signals Cheat Sheet"]
 if show_market_dash:
     pages.insert(1, "📊 Market Dashboard")
 
@@ -1357,5 +1460,7 @@ elif page == "📊 Market Dashboard":
     show_market_dashboard()
 elif page == "🔎 Ticker Analyzer":
     show_ticker_analyzer()
+elif page == "📚 STRAT Signals Cheat Sheet":
+    show_strat_cheat_sheet()
 else:
     show_scanner()
