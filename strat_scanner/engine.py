@@ -38,7 +38,8 @@ def analyze_ticker(
     strength = int(strength_meter(rs_s, rot, tr))
     meter = strength_label(strength)
 
-    trig = best_trigger(d)
+    trigger = best_trigger(df)
+
     setup = trig["Setup"]
     direction = trig["Direction"]
     status = trig["Status"]
