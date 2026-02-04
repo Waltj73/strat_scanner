@@ -1,11 +1,10 @@
-# app.py — STRAT Regime Scanner V1.4.1 (Merged + Trade Plan Notes + Market Grade + STRAT Cheat Sheet)
+# app.py — STRAT Regime Scanner V1.4.0 (Merged + Trade Plan Notes + Market Grade)
 # Includes:
 # - Scanner (STRAT regime + triggers + ranking)
 # - Market Dashboard (sentiment + sector rotation + strength leaders + Market Grade)
 # - Today Watchlist Builder (#5)
 # - Ticker Analyzer (search + explain scoring + STRAT trigger context)
 # - Trade Plan Notes (A/B/C grade, targets, invalidation, improve notes)
-# - STRAT Signals Cheat Sheet (actionable signals glossary + how to use in THIS app)
 
 import math
 from datetime import datetime, timezone
@@ -19,7 +18,7 @@ import yfinance as yf
 # =========================
 # STREAMLIT CONFIG
 # =========================
-st.set_page_config(page_title="STRAT Regime Scanner V1.4.1", layout="wide")
+st.set_page_config(page_title="STRAT Regime Scanner V1.4.0", layout="wide")
 
 # =========================
 # UNIVERSE
@@ -75,23 +74,6 @@ SECTOR_TICKERS: Dict[str, List[str]] = {
 }
 
 REQUIRED_COLS = ["Open", "High", "Low", "Close", "Volume"]
-
-# =========================
-# SESSION HELPERS
-# =========================
-def goto_page(page_name: str):
-    st.session_state["__page"] = page_name
-
-def page_selector(pages: List[str], default: str) -> str:
-    # Keep user on a page after button-driven navigation
-    if "__page" not in st.session_state:
-        st.session_state["__page"] = default
-    if st.session_state["__page"] not in pages:
-        st.session_state["__page"] = default
-    idx = pages.index(st.session_state["__page"])
-    sel = st.sidebar.radio("Go to", pages, index=idx)
-    st.session_state["__page"] = sel
-    return sel
 
 # =========================
 # DATA FETCH (CACHED) — HARDENED
@@ -316,7 +298,7 @@ def pullback_zone_ok(trend: str, rsi_val: float, pb_low: float, pb_high: float) 
     return (pb_low <= rsi_val <= pb_high)
 
 # =========================
-# STRAT HELPERS
+# STRAT HELPERS (Scanner + Analyzer)
 # =========================
 def is_inside_bar(cur: pd.Series, prev: pd.Series) -> bool:
     return (cur["High"] <= prev["High"]) and (cur["Low"] >= prev["Low"])
@@ -613,11 +595,16 @@ def analyze_ticker(
 
     tf, entry, stop = best_trigger("LONG", d_tf, w_tf)
 
+    # Improved trigger status: show readiness per timeframe
     d_ready = bool(flags["D_Inside"] and entry is not None and stop is not None and tf == "D")
     w_ready = bool(flags["W_Inside"] and entry is not None and stop is not None and tf == "W")
-    m_inside = bool(flags["M_Inside"])
+    m_ready = bool(flags["M_Inside"])  # Monthly inside exists, but we don't place monthly triggers in this app
 
-    trigger_status = f"D: {'READY' if d_ready else 'WAIT'} | W: {'READY' if w_ready else 'WAIT'} | M: {'INSIDE' if m_inside else '—'}"
+    status_parts = []
+    status_parts.append("D: READY" if d_ready else "D: WAIT")
+    status_parts.append("W: READY" if w_ready else "W: WAIT")
+    status_parts.append("M: INSIDE" if m_ready else "M: —")
+    trigger_status = " | ".join(status_parts)
 
     entry_r = None if entry is None else round(float(entry), 2)
     stop_r  = None if stop  is None else round(float(stop), 2)
@@ -686,7 +673,7 @@ def writeup_block(info: Dict, pb_low: float, pb_high: float) -> None:
         rsi_val=float(info["RSI"]),
         strength=int(info["Strength"]),
         rotation=float(info["Rotation"]),
-        trigger_status=info["TriggerStatus"],
+        trigger_status=("READY" if ("READY" in info["TriggerStatus"]) else "WAIT"),
         tf=info["TF"],
         entry=info["Entry"],
         stop=info["Stop"],
@@ -717,152 +704,163 @@ def writeup_block(info: Dict, pb_low: float, pb_high: float) -> None:
             st.write(f"- {s}")
 
 # =========================
-# CHEAT SHEET PAGE (NEW)
-# =========================
-def show_strat_cheat_sheet():
-    st.title("🧾 STRAT Signals Cheat Sheet (for THIS Scanner)")
-    st.caption("Actionable signals + exactly how this app labels them.")
-
-    st.markdown("""
-## 1) Candle Types (The STRAT Basics)
-
-**1 = Inside Bar**  
-- Current high ≤ prior high AND current low ≥ prior low  
-- Meaning: compression / coil / “pause”  
-- **In this app:** `D_Inside`, `W_Inside`, `M_Inside`
-
-**2U = Two-Up**  
-- Current high > prior high AND low ≥ prior low  
-- Meaning: directional expansion up  
-- **In this app:** part of `D_Bull`, `W_Bull`, `M_Bull`
-
-**2D = Two-Down**  
-- Current low < prior low AND high ≤ prior high  
-- Meaning: directional expansion down  
-- **In this app:** part of `D_Bear`, `W_Bear`, `M_Bear`
-
----
-
-## 2) Actionable Triggers (The Ones You Actually Place Orders On)
-
-### ✅ Inside Bar Break (Primary Trigger)
-**LONG:** buy stop above the Inside Bar HIGH  
-**STOP:** below the Inside Bar LOW  
-
-**SHORT:** sell stop below the Inside Bar LOW  
-**STOP:** above the Inside Bar HIGH  
-
-**In this app:**  
-- We compute triggers from the **best available Inside Bar** (Weekly first, then Daily)  
-- You’ll see:
-  - `D: READY / WAIT`
-  - `W: READY / WAIT`
-  - `M: INSIDE / —` (monthly inside exists, but we don't place monthly orders)
-
-**Rule of thumb:** Weekly triggers > Daily triggers.
-
----
-
-## 3) The 2-1-2 Pattern (Continuation Setup)
-
-**2-1-2 Up:** a 2U, then an inside bar, then a 2U  
-**2-1-2 Down:** a 2D, then an inside bar, then a 2D  
-
-**In this app:**  
-- `D_212Up`, `W_212Up`  
-- `D_212Dn`, `W_212Dn`  
-
-**How to trade it (simple):**  
-- Trade it like an inside bar trigger **in the direction of the final 2**  
-- It’s basically “compression → expansion continuation.”
-
----
-
-## 4) Alignment (Why Your Scanner Filters Work)
-
-**Monthly / Weekly Alignment = higher follow-through odds.**
-
-- For LONG bias, the scanner can require:
-  - Monthly Bull OR Weekly Bull  
-- For SHORT bias:
-  - Monthly Bear OR Weekly Bear  
-
-**In this app:** `Require Monthly OR Weekly alignment`
-
----
-
-## 5) What “READY” Means Inside This App
-
-A ticker is **READY** when:
-- It has an Inside Bar **(Daily or Weekly)**  
-- The app can compute:
-  - **Entry** = IB break level  
-  - **Stop** = opposite side of the IB
-
-If there is no Inside Bar → you’ll see **WAIT** (and that’s correct).
-
----
-
-## 6) How To Use This Tool Daily (2–5 minutes)
-
-1. **Dashboard:** Check **Market Grade**
-   - UP + A/B → prefer longs
-   - MIXED → smaller size / fewer trades
-2. **Rotation IN:** pick the strongest groups
-3. **Watchlist:** focus the top names
-4. Only trade tickers showing:
-   - **W: READY** (best)
-   - or **D: READY** (still valid)
-5. Execute:
-   - Stop order at Entry
-   - Hard stop at Stop
-   - Manage to T1 / T2 (20d/63d levels in write-up)
-
----
-
-## 7) Quick Glossary (What you’ll see in tables)
-
-- **Strength** = leadership score (RS vs SPY + rotation + trend)
-- **Rotation** = RS(short) − RS(long) (money flowing in/out)
-- **Trend** = UP if price is above EMA and EMA rising
-- **TriggerStatus** = D/W/M readiness snapshot
-""")
-
-    st.info("Want it even tighter? Tell me your exact STRAT vocabulary list (RevStrat, actionable reversals, etc.) and I’ll add it as V1.4.2.")
-
-# =========================
-# USER GUIDE PAGE
+# PAGES
 # =========================
 def show_user_guide():
-    st.title("📘 STRAT Regime Scanner — Complete User Guide (V1.4.1)")
+    st.title("📘 STRAT Regime Scanner — Complete User Guide (V1.4)")
+
     st.markdown("""
-## What This Tool Does
-Market Bias → Rotation → Leaders → Pullback → Trigger → Execution.
+## Welcome — What This Tool Is Designed To Do
 
-If you have **no trigger**, you **wait**. That is the edge.
+The STRAT Regime Scanner organizes the market into a clear decision process so you are not randomly picking trades.  
+It guides you from:
 
-Use the **Cheat Sheet** page for signal definitions.
+Market Bias → Sector Rotation → Stock Leadership → Pullback → STRAT Trigger → Execution.
+
+Instead of guessing, you trade where money is already flowing.
+
+---
+
+## App Structure Overview
+
+### STRAT Regime Scanner
+This is your execution engine.
+
+It determines:
+- Market bias
+- Sector alignment
+- Stocks with setups forming
+- Inside bar trigger entries
+- Entry & stop levels
+
+If the scanner shows entry and stop levels, the trade is actionable.  
+If not, the correct action is to wait.
+
+---
+
+### Market Dashboard
+The dashboard answers:
+
+“Where is money flowing?”
+
+It shows:
+- Overall sentiment
+- **Market Grade (UP / DOWN / MIXED + A/B/C)**
+- Sector & metals rotation
+- Relative strength leaders
+- Momentum improvement or deterioration
+
+The dashboard guides where to look.  
+The scanner decides when to act.
+
+---
+
+### Today Watchlist Builder
+The watchlist is built automatically each day by:
+
+1. Finding sectors rotating into strength
+2. Selecting strongest stocks inside them
+3. Filtering by trend + pullback quality
+4. Checking STRAT trigger readiness
+5. Showing trade-plan notes
+
+This becomes your daily focus list.
+
+---
+
+### Ticker Analyzer
+Type any ticker and see:
+
+- Trend condition
+- RSI state
+- Relative strength vs SPY
+- Rotation behavior
+- STRAT alignment
+- Trigger readiness **(D / W / M)**
+- Trade plan explanation
+
+This explains WHY a stock is or isn't attractive.
+
+---
+
+## Strength Score Explained
+
+Strength combines:
+
+• Relative strength vs SPY  
+• Rotation improvement  
+• Trend direction  
+• Momentum persistence  
+
+Scores are capped so extreme moves don't distort rankings.
+
+Interpretation:
+
+- 70–100 → Strong leadership
+- 45–69 → Neutral
+- 0–44 → Weak
+
+---
+
+## Trigger Status (New)
+
+You now see:
+
+- **D: READY / WAIT**
+- **W: READY / WAIT**
+- **M: INSIDE / —**
+
+Meaning:
+- Daily Ready = a Daily Inside Bar exists AND the tool can compute entry/stop
+- Weekly Ready = a Weekly Inside Bar exists AND the tool can compute entry/stop
+- Monthly Inside = the month is inside, but this app doesn’t place monthly stop orders
+
+---
+
+## STRAT Trigger Logic
+
+LONG setup:
+- Entry: break of Inside Bar HIGH
+- Stop: below Inside Bar LOW
+
+SHORT setup:
+- Entry: break of Inside Bar LOW
+- Stop: above Inside Bar HIGH
+
+Weekly triggers are stronger than daily.
+
+---
+
+## Recommended Daily Workflow
+
+1. Open Market Dashboard
+2. Check Market Grade + Trend
+3. Identify sectors rotating IN
+4. Review Today Watchlist
+5. Execute only valid triggers
+
+Total time: 2–5 minutes.
+
+---
+
+## Best Default Settings
+
+Swing trading defaults:
+
+RS short: 21  
+RS long: 63  
+Trend EMA: 50  
+RSI length: 14  
+Pullback zone: 40–55
 """)
 
-# =========================
-# MARKET DASHBOARD
-# =========================
+
 def show_market_dashboard():
-    st.title("📊 Market Dashboard (Sentiment • Market Grade • Rotation • Leaders • Watchlist) — V1.4.1")
+    st.title("📊 Market Dashboard (Sentiment • Market Grade • Rotation • Leaders • Watchlist) — V1.4.0")
     st.caption("Strength meter is capped for stability. Watchlist write-ups include Trade Plan Notes.")
 
-    topbar = st.columns([1, 1, 6])
-    with topbar[0]:
-        if st.button("🧾 Cheat Sheet"):
-            goto_page("🧾 STRAT Cheat Sheet")
-            st.rerun()
-    with topbar[1]:
-        if st.button("Refresh data"):
-            st.cache_data.clear()
-            st.rerun()
-
     with st.expander("Dashboard Settings", expanded=True):
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns([1.1, 1.1, 1.1, 1.1, 1.2])
         with c1:
             rs_short = st.selectbox("RS Lookback (short)", [21, 30, 42], index=0)
         with c2:
@@ -871,6 +869,10 @@ def show_market_dashboard():
             ema_trend_len = st.selectbox("Trend EMA", [50, 100, 200], index=0)
         with c4:
             rsi_len = st.selectbox("RSI Length", [7, 14, 21], index=1)
+        with c5:
+            if st.button("Refresh data"):
+                st.cache_data.clear()
+                st.rerun()
 
     with st.expander("Today Watchlist Settings", expanded=True):
         w1, w2, w3, w4, w5 = st.columns([1, 1, 1, 1, 1.2])
@@ -885,7 +887,10 @@ def show_market_dashboard():
         with w5:
             strict_pullback = st.checkbox("Strict pullback filter (only show RSI-in-zone)", value=False)
 
-    st.subheader("Overall Market Sentiment + Market Grade")
+    # =========================
+    # OVERALL MARKET SENTIMENT + MARKET GRADE (NEW MODULE)
+    # =========================
+    st.subheader("Overall Market Sentiment")
 
     market_syms = list(MARKET_ETFS.values()) + ["^VIX"]
     core_syms = ["SPY", "QQQ", "IWM", "DIA"]
@@ -898,6 +903,7 @@ def show_market_dashboard():
 
     with left:
         mcols = st.columns(len(market_syms))
+
         for i, sym in enumerate(market_syms):
             d = get_hist(sym)
             if d.empty:
@@ -957,6 +963,16 @@ def show_market_dashboard():
         st.write(f"**Grade:** **{grade}**")
         st.write(f"**Strength:** **{strength}/100**")
 
+        if overall_trend == "UP":
+            st.success("Lean LONG: focus leaders + triggers.")
+        elif overall_trend == "DOWN":
+            st.error("Risk OFF: be defensive (or shorts only if you enable short logic).")
+        else:
+            st.warning("Mixed: trade smaller, wait for A+ triggers.")
+
+    # =========================
+    # SPY series for RS computations
+    # =========================
     spy_df = get_hist("SPY")
     if spy_df.empty:
         st.warning("SPY data unavailable; cannot compute RS vs SPY.")
@@ -1103,22 +1119,9 @@ def show_market_dashboard():
         else:
             writeup_block(info, pb_low, pb_high)
 
-# =========================
-# TICKER ANALYZER
-# =========================
 def show_ticker_analyzer():
-    st.title("🔎 Ticker Analyzer — Explain the Score + STRAT Context + Trade Plan Notes (V1.4.1)")
+    st.title("🔎 Ticker Analyzer — Explain the Score + STRAT Context + Trade Plan Notes (V1.4.0)")
     st.caption("Type any ticker and get a swing-trader style gameplan automatically.")
-
-    topbar = st.columns([1, 1, 6])
-    with topbar[0]:
-        if st.button("🧾 Cheat Sheet"):
-            goto_page("🧾 STRAT Cheat Sheet")
-            st.rerun()
-    with topbar[1]:
-        if st.button("Refresh data"):
-            st.cache_data.clear()
-            st.rerun()
 
     with st.expander("Analyzer Settings", expanded=True):
         c1, c2, c3, c4, c5 = st.columns([1.1, 1.1, 1.1, 1.1, 1.2])
@@ -1261,18 +1264,8 @@ def calc_scores(
     return setup, mag, total
 
 def show_scanner():
-    st.title("STRAT Regime Scanner (Auto LONG/SHORT + Magnitude) — V1.4.1")
+    st.title("STRAT Regime Scanner (Auto LONG/SHORT + Magnitude) — V1.4.0")
     st.caption("Bias from market regime. Ranks tickers by setup quality AND magnitude (RR + ATR% + compression).")
-
-    topbar = st.columns([1, 1, 6])
-    with topbar[0]:
-        if st.button("🧾 Cheat Sheet"):
-            goto_page("🧾 STRAT Cheat Sheet")
-            st.rerun()
-    with topbar[1]:
-        if st.button("Refresh data"):
-            st.cache_data.clear()
-            st.rerun()
 
     with st.expander("Filters", expanded=True):
         colA, colB, colC, colD = st.columns([1.1, 1.2, 1.6, 1.1])
@@ -1285,6 +1278,12 @@ def show_scanner():
             require_alignment = st.checkbox("Require Monthly OR Weekly alignment (bias direction)", value=True)
         with colD:
             top_k = st.slider("Top Picks count", min_value=3, max_value=8, value=5)
+
+        colR1, _ = st.columns([1, 3])
+        with colR1:
+            if st.button("Refresh data"):
+                st.cache_data.clear()
+                st.rerun()
 
     st.caption(f"Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
 
@@ -1363,7 +1362,7 @@ def show_scanner():
     tickers = SECTOR_TICKERS.get(sector_choice, [])
     st.write(f"Selected: **{sector_choice}** ({SECTOR_ETFS.get(sector_choice,'')}) — tickers in list: **{len(tickers)}**")
 
-    scan_n = st.slider("How many tickers to scan", min_value=1, max_value=max(1, len(tickers)), value=min(15, len(tickers)))
+    scan_n = st.slider("How many tickers to scan", min_value=1, max_value=len(tickers), value=min(15, len(tickers)))
     scan_list = tickers[:scan_n]
 
     cand_rows: List[Dict] = []
@@ -1454,6 +1453,13 @@ def show_scanner():
         )
 
     st.subheader("Quick Market Read")
+
+    if bias in ("LONG", "SHORT"):
+        rotation_in = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.head(3).iterrows()]
+        rotation_out = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.tail(3).iterrows()]
+    else:
+        rotation_in, rotation_out = [], []
+
     if bias == "MIXED" or strength < 50:
         plan = "Plan: Defensive. Trade smaller, or wait for A+ triggers."
         badge = "🟠"
@@ -1469,23 +1475,32 @@ def show_scanner():
         f"Strength: **{strength}/100** | "
         f"Bull–Bear diff: **{bull_bear_diff}**"
     )
+
+    if rotation_in:
+        st.write("### Rotation IN")
+        st.write(", ".join(rotation_in))
+
+    if rotation_out:
+        st.write("### Rotation OUT")
+        st.write(", ".join(rotation_out))
+
     st.success(plan)
+    st.caption(
+        "Trigger logic: LONG = break of Inside Bar high / stop below low. "
+        "SHORT = break of Inside Bar low / stop above high. Weekly triggers preferred."
+    )
 
 # =========================
 # SIDEBAR NAV
 # =========================
 st.sidebar.title("Navigation")
-
 show_market_dash = st.sidebar.toggle("Enable Market Dashboard", value=True)
 
-pages = ["Scanner", "📘 User Guide", "🔎 Ticker Analyzer", "🧾 STRAT Cheat Sheet"]
-if not show_market_dash:
-    # remove dashboard if disabled
-    pass
-else:
+pages = ["Scanner", "📘 User Guide", "🔎 Ticker Analyzer"]
+if show_market_dash:
     pages.insert(1, "📊 Market Dashboard")
 
-page = page_selector(pages, default="Scanner")
+page = st.sidebar.radio("Go to", pages)
 st.sidebar.caption(f"Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
 
 # =========================
@@ -1497,7 +1512,5 @@ elif page == "📊 Market Dashboard":
     show_market_dashboard()
 elif page == "🔎 Ticker Analyzer":
     show_ticker_analyzer()
-elif page == "🧾 STRAT Cheat Sheet":
-    show_strat_cheat_sheet()
 else:
     show_scanner()
