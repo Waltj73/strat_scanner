@@ -53,6 +53,13 @@ SECTOR_ETFS = {
     **METALS_ETFS,
 }
 
+CRYPTO_ETFS = {
+    "Crypto - Bitcoin": "BTC-USD",
+    "Crypto - Ethereum": "ETH-USD",
+    "Crypto - Solana": "SOL-USD",
+}
+
+
 SECTOR_TICKERS: Dict[str, List[str]] = {
     "Energy": ["XOM","CVX","COP","EOG","SLB","HAL","PSX","MPC","VLO","OXY","KMI","WMB","BKR","DVN","PXD"],
     "Comm Services": ["GOOGL","GOOG","META","NFLX","TMUS","VZ","T","DIS","CMCSA","CHTR","EA","TTWO","SPOT","ROKU","SNAP"],
@@ -72,6 +79,13 @@ SECTOR_TICKERS: Dict[str, List[str]] = {
     "Metals - Platinum": ["PPLT"],
     "Metals - Palladium": ["PALL"],
 }
+
+SECTOR_TICKERS.update({
+    "Crypto - Bitcoin": ["BTC-USD"],
+    "Crypto - Ethereum": ["ETH-USD"],
+    "Crypto - Solana": ["SOL-USD"],
+})
+
 
 REQUIRED_COLS = ["Open", "High", "Low", "Close", "Volume"]
 
