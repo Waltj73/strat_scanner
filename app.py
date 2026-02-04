@@ -1,4 +1,4 @@
-# app.py — STRAT Regime Scanner V1.3.1 (Stable + Better Trigger Status + Major Coins)
+# app.py — STRAT Regime Scanner V1.3.1 (Clean Fix: Better Trigger Status + Color Coding)
 # Includes:
 # - Scanner (STRAT regime + triggers + ranking)
 # - Market Dashboard (sentiment + sector rotation + strength leaders)
@@ -6,9 +6,9 @@
 # - Ticker Analyzer (search + explain scoring + STRAT trigger context)
 # - Trade Plan Notes (A/B/C grade, targets, invalidation, improve notes)
 #
-# Changes in V1.3.1:
-# ✅ Better Trigger Status (WAIT / READY / TRIGGERED) + timeframe label
-# ✅ Added Major Coins (BTC, ETH, SOL) using yfinance symbols: BTC-USD, ETH-USD, SOL-USD
+# FIXES IN THIS VERSION:
+# ✅ “Better Trigger Status” (WAIT / READY (W|D) / TRIGGERED (W|D))
+# ✅ Color-coded trigger labels in tables + write-ups
 
 import math
 from datetime import datetime, timezone
@@ -55,7 +55,7 @@ SECTOR_ETFS = {
     "Technology": "XLK",
     "Health Care": "XLV",
     **METALS_ETFS,
-    }
+}
 
 SECTOR_TICKERS: Dict[str, List[str]] = {
     "Energy": ["XOM","CVX","COP","EOG","SLB","HAL","PSX","MPC","VLO","OXY","KMI","WMB","BKR","DVN","PXD"],
@@ -75,7 +75,6 @@ SECTOR_TICKERS: Dict[str, List[str]] = {
     "Metals - Copper": ["CPER"],
     "Metals - Platinum": ["PPLT"],
     "Metals - Palladium": ["PALL"],
-
 }
 
 REQUIRED_COLS = ["Open", "High", "Low", "Close", "Volume"]
@@ -151,7 +150,6 @@ def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
                 break
 
     if "Volume" not in df.columns:
-        # crypto sometimes returns Volume; if not, keep 0 so downstream doesn't break
         df["Volume"] = 0
 
     needed = ["Open", "High", "Low", "Close", "Volume"]
@@ -304,6 +302,21 @@ def pullback_zone_ok(trend: str, rsi_val: float, pb_low: float, pb_high: float) 
     return (pb_low <= rsi_val <= pb_high)
 
 # =========================
+# TRIGGER STATUS COLOR (NEW)
+# =========================
+def trigger_style(val: str) -> str:
+    if not isinstance(val, str):
+        return ""
+    v = val.upper()
+    if "TRIGGERED" in v:
+        return "background-color: #5a1111; color: white; font-weight: 700;"
+    if "READY" in v:
+        return "background-color: #114b2b; color: white; font-weight: 700;"
+    if "WAIT" in v:
+        return "background-color: #5a4b11; color: white; font-weight: 700;"
+    return ""
+
+# =========================
 # STRAT HELPERS (Scanner + Analyzer)
 # =========================
 def is_inside_bar(cur: pd.Series, prev: pd.Series) -> bool:
@@ -431,12 +444,6 @@ def alignment_ok(bias: str, flags: Dict[str, bool]) -> bool:
     return False
 
 def best_trigger(bias: str, d: pd.DataFrame, w: pd.DataFrame) -> Tuple[Optional[str], Optional[float], Optional[float]]:
-    """
-    Returns trigger timeframe + levels IF an Inside Bar exists.
-    Prefers Weekly inside bar, then Daily.
-    For LONG: entry=IB high, stop=IB low
-    For SHORT: entry=IB low,  stop=IB high
-    """
     if strat_inside(w) and len(w) >= 2:
         cur = w.iloc[-1]
         hi, lo = float(cur["High"]), float(cur["Low"])
@@ -449,34 +456,33 @@ def best_trigger(bias: str, d: pd.DataFrame, w: pd.DataFrame) -> Tuple[Optional[
 
     return None, None, None
 
-def trigger_status(
-    bias: str,
-    d: pd.DataFrame,
-    w: pd.DataFrame
-) -> Tuple[str, Optional[str], Optional[float], Optional[float]]:
-    """
-    Better trigger status:
-      - WAIT: no inside bar (no clean levels)
-      - READY: inside bar exists, entry/stop available, not hit yet
-      - TRIGGERED: price has already touched entry level
-    """
-    tf, entry, stop = best_trigger(bias, d, w)
-    if entry is None or stop is None:
-        return "WAIT (No Inside Bar)", None, None, None
+# =========================
+# BETTER TRIGGER STATUS (NEW)
+# =========================
+def trigger_status_label(bias: str, d: pd.DataFrame, w: pd.DataFrame) -> str:
+    # Prefer Weekly inside bar if present
+    if strat_inside(w) and len(w) >= 2:
+        cur = w.iloc[-1]
+        hi, lo = float(cur["High"]), float(cur["Low"])
+        last = float(w["Close"].iloc[-1])
 
-    # Use DAILY bar to detect if entry was touched (more responsive than weekly)
-    cur_d = d.iloc[-1] if (d is not None and not d.empty) else None
-
-    triggered = False
-    if cur_d is not None:
         if bias == "LONG":
-            triggered = bool(float(cur_d["High"]) >= float(entry))
+            return "TRIGGERED (W)" if last > hi else "READY (W)"
         else:
-            triggered = bool(float(cur_d["Low"]) <= float(entry))
+            return "TRIGGERED (W)" if last < lo else "READY (W)"
 
-    if triggered:
-        return f"TRIGGERED ({tf} Entry hit)", tf, entry, stop
-    return f"READY ({tf} Inside Bar)", tf, entry, stop
+    # Fall back to Daily inside bar
+    if strat_inside(d) and len(d) >= 2:
+        cur = d.iloc[-1]
+        hi, lo = float(cur["High"]), float(cur["Low"])
+        last = float(d["Close"].iloc[-1])
+
+        if bias == "LONG":
+            return "TRIGGERED (D)" if last > hi else "READY (D)"
+        else:
+            return "TRIGGERED (D)" if last < lo else "READY (D)"
+
+    return "WAIT (No Inside Bar)"
 
 # =========================
 # TRADE PLAN NOTES
@@ -527,7 +533,7 @@ def trade_plan_notes(
     rsi_val: float,
     strength: int,
     rotation: float,
-    trigger_status_txt: str,
+    trigger_status: str,
     tf: Optional[str],
     entry: Optional[float],
     stop: Optional[float],
@@ -535,18 +541,15 @@ def trade_plan_notes(
     pb_low: float,
     pb_high: float,
 ) -> Dict[str, str]:
-    has_levels = (entry is not None and stop is not None)
-    has_trigger = has_levels and ("READY" in trigger_status_txt or "TRIGGERED" in trigger_status_txt)
+    has_trigger = (entry is not None and stop is not None) and ("READY" in trigger_status)
 
     grade = pick_grade(strength, trend, rotation, has_trigger, rsi_val, pb_low, pb_high)
 
     if trend != "UP":
         play = "AVOID (trend not UP) or treat as short-only if you add short logic later."
     else:
-        if "READY" in trigger_status_txt:
-            play = "BREAKOUT PLAY: set stop-order at Entry; Stop is your invalidation."
-        elif "TRIGGERED" in trigger_status_txt:
-            play = "TRIGGERED: manage like a live trade (risk defined by Entry→Stop)."
+        if has_trigger:
+            play = "BREAKOUT PLAY: place a stop order at entry + use stop as defined."
         else:
             pb_ok = pullback_zone_ok(trend, rsi_val, pb_low, pb_high)
             play = "WAIT: no inside bar trigger yet." if not pb_ok else "PULLBACK PLAY: strong name in pullback zone—wait for inside bar."
@@ -574,7 +577,6 @@ def trade_plan_notes(
 
     t1, t2 = targets_from_range(d_df, entry, "LONG")
     invalidation = "Invalidation = break below STOP (or close below if you trade close-based)."
-
     improve = []
     if trend != "UP":
         improve.append("Improve: reclaim and hold above your trend EMA + RS turns positive.")
@@ -582,7 +584,7 @@ def trade_plan_notes(
         improve.append("Improve: rotation flips positive (short-term RS > long-term RS).")
     if not pullback_zone_ok(trend, rsi_val, pb_low, pb_high):
         improve.append(f"Improve: RSI pulls into {pb_low}-{pb_high} zone without breaking trend.")
-    if not has_levels:
+    if not has_trigger:
         improve.append("Improve: print a Daily or Weekly Inside Bar for clean entry/stop.")
 
     rr_hint = ""
@@ -640,8 +642,8 @@ def analyze_ticker(
     d_tf, w_tf, m_tf = tf_frames(d)
     flags = compute_flags(d_tf, w_tf, m_tf)
 
-    # Analyzer is long-focused (as your trade plan notes are long-oriented)
-    trig_txt, tf, entry, stop = trigger_status("LONG", d_tf, w_tf)
+    tf, entry, stop = best_trigger("LONG", d_tf, w_tf)
+    trigger_status = trigger_status_label("LONG", d_tf, w_tf)
 
     entry_r = None if entry is None else round(float(entry), 2)
     stop_r  = None if stop  is None else round(float(stop), 2)
@@ -675,7 +677,7 @@ def analyze_ticker(
         "Rotation": rot,
         "Strength": strength,
         "Meter": meter,
-        "TriggerStatus": trig_txt,
+        "TriggerStatus": trigger_status,
         "TF": tf,
         "Entry": entry_r,
         "Stop": stop_r,
@@ -698,9 +700,13 @@ def writeup_block(info: Dict, pb_low: float, pb_high: float) -> None:
     pb_ok = pullback_zone_ok(info["Trend"], info["RSI"], pb_low, pb_high)
     st.write(f"**Pullback Zone ({pb_low}-{pb_high}) OK?** {'✅ YES' if pb_ok else '❌ NO'}")
 
-    st.write(
-        f"**Trigger:** {info['TriggerStatus']}"
-        + (f" | TF: **{info['TF']}** | Entry: **{info['Entry']}** | Stop: **{info['Stop']}**" if info["Entry"] else "")
+    # Trigger line + color badge
+    trig = info["TriggerStatus"]
+    st.markdown(
+        f"**Trigger:** "
+        f"<span style='{trigger_style(trig)} padding: 3px 8px; border-radius: 8px;'>{trig}</span>"
+        + (f" &nbsp;| TF: **{info['TF']}** | Entry: **{info['Entry']}** | Stop: **{info['Stop']}**" if info["Entry"] else ""),
+        unsafe_allow_html=True,
     )
 
     plan = trade_plan_notes(
@@ -709,7 +715,7 @@ def writeup_block(info: Dict, pb_low: float, pb_high: float) -> None:
         rsi_val=float(info["RSI"]),
         strength=int(info["Strength"]),
         rotation=float(info["Rotation"]),
-        trigger_status_txt=info["TriggerStatus"],
+        trigger_status=info["TriggerStatus"],
         tf=info["TF"],
         entry=info["Entry"],
         stop=info["Stop"],
@@ -757,73 +763,16 @@ Instead of guessing, you trade where money is already flowing.
 
 ---
 
-## App Structure Overview
+## Trigger Status (NEW)
 
-### STRAT Regime Scanner
-This is your execution engine.
+**WAIT (No Inside Bar)**  
+No clean inside bar. Correct action is to wait.
 
-It determines:
-- Market bias
-- Sector alignment
-- Stocks with setups forming
-- Inside bar trigger entries
-- Entry & stop levels
+**READY (W)** / **READY (D)**  
+An inside bar exists. Use its high/low as your entry/stop levels.
 
-If the scanner shows entry and stop levels, the trade is actionable.  
-If not, the correct action is to wait.
-
----
-
-### Market Dashboard
-The dashboard answers:
-
-“Where is money flowing?”
-
-It shows:
-- Market sentiment
-- Sector & metals rotation
-- Relative strength leaders
-- Momentum improvement or deterioration
-
-The dashboard guides where to look.  
-The scanner decides when to act.
-
----
-
-### Today Watchlist Builder
-The watchlist is built automatically each day by:
-
-1. Finding sectors rotating into strength
-2. Selecting strongest stocks inside them
-3. Filtering by trend + pullback quality
-4. Checking STRAT trigger readiness
-5. Showing trade-plan notes
-
-This becomes your daily focus list.
-
----
-
-### Ticker Analyzer
-Type any ticker and see:
-
-- Trend condition
-- RSI state
-- Relative strength vs SPY
-- Rotation behavior
-- STRAT alignment
-- Trigger readiness
-- Trade plan explanation
-
-This explains WHY a stock is or isn't attractive.
-
----
-
-## Better Trigger Status (New)
-
-- **WAIT (No Inside Bar)** → no clean entry/stop levels yet  
-- **READY (W Inside Bar)** → weekly inside bar exists (preferred), entry/stop shown  
-- **READY (D Inside Bar)** → daily inside bar exists, entry/stop shown  
-- **TRIGGERED (Entry hit)** → price has already touched entry level
+**TRIGGERED (W)** / **TRIGGERED (D)**  
+Price already broke the inside bar. That’s usually a “missed clean entry” warning.
 
 ---
 
@@ -838,9 +787,10 @@ RSI length: 14
 Pullback zone: 40–55
 """)
 
+
 def show_market_dashboard():
     st.title("📊 Market Dashboard (Sentiment • Rotation • Leaders • Watchlist) — V1.3.1")
-    st.caption("Strength meter is capped for stability. Write-ups include Trade Plan Notes.")
+    st.caption("Strength meter is capped for stability. Trigger Status is color-coded.")
 
     with st.expander("Dashboard Settings", expanded=True):
         c1, c2, c3, c4, c5 = st.columns([1.1, 1.1, 1.1, 1.1, 1.2])
@@ -906,7 +856,7 @@ def show_market_dashboard():
         st.warning("Not enough SPY history for these lookbacks.")
         return
 
-    st.subheader("Sector / Metals / Crypto Rotation + Strength (Relative Strength vs SPY)")
+    st.subheader("Sector / Metals Rotation + Strength (Relative Strength vs SPY)")
     sector_rows = []
     for name, etf in SECTOR_ETFS.items():
         d = get_hist(etf)
@@ -932,7 +882,7 @@ def show_market_dashboard():
 
         sector_rows.append({
             "Group": name,
-            "ETF/Symbol": etf,
+            "ETF": etf,
             "Strength": score,
             "Meter": strength_label(score),
             f"RS vs SPY ({rs_short})": rs_s,
@@ -944,7 +894,7 @@ def show_market_dashboard():
 
     sectors = pd.DataFrame(sector_rows)
     if sectors.empty:
-        st.warning("Group data unavailable right now (yfinance returned empty). Try Refresh.")
+        st.warning("Sector data unavailable right now (yfinance returned empty). Try Refresh.")
         return
 
     sectors = sectors.sort_values(["Strength", "Rotation (RS short - RS long)"], ascending=[False, False])
@@ -965,8 +915,8 @@ def show_market_dashboard():
 
     st.subheader("✅ Today Watchlist (Auto-built from Rotation IN + Leaders)")
 
-    top_groups = sectors.head(int(top_sectors_in))[["Group","ETF/Symbol","Strength","Meter"]].to_dict("records")
-    st.write("**Top Groups IN:** " + ", ".join([f"{g['Group']}({g['ETF/Symbol']}) {g['Meter']} {g['Strength']}" for g in top_groups]))
+    top_groups = sectors.head(int(top_sectors_in))[["Group","ETF","Strength","Meter"]].to_dict("records")
+    st.write("**Top Groups IN:** " + ", ".join([f"{g['Group']}({g['ETF']}) {g['Meter']} {g['Strength']}" for g in top_groups]))
 
     watchlist: List[Dict] = []
     for g in top_groups:
@@ -1021,6 +971,7 @@ def show_market_dashboard():
         })
         .applymap(meter_style, subset=["Meter"])
         .applymap(strength_style, subset=["Strength"])
+        .applymap(trigger_style, subset=["Trigger"])
     )
     st.dataframe(wstyled, use_container_width=True, hide_index=True, height=420)
 
@@ -1044,7 +995,7 @@ def show_market_dashboard():
 
 def show_ticker_analyzer():
     st.title("🔎 Ticker Analyzer — Explain the Score + STRAT Context + Trade Plan Notes (V1.3.1)")
-    st.caption("Type any ticker and get a swing-trader style gameplan automatically.")
+    st.caption("Type any ticker and get a swing-trader style gameplan automatically (Trigger Status is color-coded).")
 
     with st.expander("Analyzer Settings", expanded=True):
         c1, c2, c3, c4, c5 = st.columns([1.1, 1.1, 1.1, 1.1, 1.2])
@@ -1083,7 +1034,7 @@ def show_ticker_analyzer():
             writeup_block(info, pb_low, pb_high)
 
 # =========================
-# SCANNER (UNCHANGED CORE + Better Trigger Status)
+# SCANNER
 # =========================
 def magnitude_metrics(
     bias: str,
@@ -1188,7 +1139,7 @@ def calc_scores(
 
 def show_scanner():
     st.title("STRAT Regime Scanner (Auto LONG/SHORT + Magnitude) — V1.3.1")
-    st.caption("Bias from market regime. Ranks tickers by setup quality AND magnitude (RR + ATR% + compression).")
+    st.caption("Bias from market regime. Ranks by setup quality AND magnitude (RR + ATR% + compression). Trigger Status is color-coded.")
 
     with st.expander("Filters", expanded=True):
         colA, colB, colC, colD = st.columns([1.1, 1.2, 1.6, 1.1])
@@ -1253,7 +1204,7 @@ def show_scanner():
             flags = compute_flags(d_tf, w_tf, m_tf)
             bull, bear = score_regime(flags)
 
-        row = {"Sector": sector, "ETF/Symbol": etf, "BullScore": bull, "BearScore": bear}
+        row = {"Sector": sector, "ETF": etf, "BullScore": bull, "BearScore": bear}
         row.update(flags)
         sector_rows.append(row)
 
@@ -1267,10 +1218,10 @@ def show_scanner():
         sectors_df["Dominance"] = (sectors_df["BullScore"] - sectors_df["BearScore"]).abs()
         sectors_df = sectors_df.sort_values("Dominance", ascending=False)
 
-    st.subheader("Sectors + Metals + Crypto — ranked after bias is known")
+    st.subheader("Sectors + Metals — ranked after bias is known")
     st.dataframe(
         sectors_df[[
-            "Sector","ETF/Symbol","BullScore","BearScore",
+            "Sector","ETF","BullScore","BearScore",
             "D_Bull","W_Bull","M_Bull","D_Bear","W_Bear","M_Bear",
             "D_Inside","W_Inside","M_Inside",
             "D_212Up","W_212Up","D_212Dn","W_212Dn"
@@ -1281,7 +1232,7 @@ def show_scanner():
 
     st.subheader("Drill into a group (ranks candidates in bias direction + magnitude)")
 
-    sector_choice = st.selectbox("Choose a sector/metals/crypto group:", options=list(SECTOR_TICKERS.keys()), index=0)
+    sector_choice = st.selectbox("Choose a sector/metals group:", options=list(SECTOR_TICKERS.keys()), index=0)
     tickers = SECTOR_TICKERS.get(sector_choice, [])
     st.write(f"Selected: **{sector_choice}** ({SECTOR_ETFS.get(sector_choice,'')}) — tickers in list: **{len(tickers)}**")
 
@@ -1311,14 +1262,15 @@ def show_scanner():
 
         eff_bias = bias if bias in ("LONG","SHORT") else "LONG"
 
-        trig_txt, tf, entry, stop = trigger_status(eff_bias, d_tf, w_tf)
-
+        tf, entry, stop = best_trigger(eff_bias, d_tf, w_tf)
         rr, atrp, room, compression = magnitude_metrics(eff_bias, d_tf, entry, stop)
         setup_score, mag_score, total_score = calc_scores(eff_bias, flags, rr, atrp, compression, entry, stop)
 
+        trigger_status = trigger_status_label(eff_bias, d_tf, w_tf)
+
         cand = {
             "Ticker": t,
-            "TriggerStatus": trig_txt,
+            "TriggerStatus": trigger_status,
             "SetupScore": setup_score,
             "MagScore": mag_score,
             "TotalScore": total_score,
@@ -1344,38 +1296,36 @@ def show_scanner():
             "W_212Up","D_212Up","M_Bull","W_Bull","D_Bull","W_Inside","D_Inside",
             "W_212Dn","D_212Dn","M_Bear","W_Bear","D_Bear"
         ]]
-        st.dataframe(top_df, use_container_width=True, hide_index=True)
+        top_styled = top_df.style.applymap(trigger_style, subset=["TriggerStatus"])
+        st.dataframe(top_styled, use_container_width=True, hide_index=True)
 
-        st.markdown("### 🎯 Trade of the Day (best TotalScore + valid levels)")
+        st.markdown("### 🎯 Trade of the Day (best TotalScore + valid READY trigger)")
         valid = cand_df.dropna(subset=["Entry","Stop","RR"]).copy()
-        valid = valid[valid["RR"] >= 2.0]
+        valid = valid[(valid["RR"] >= 2.0) & (valid["TriggerStatus"].str.contains("READY", na=False))]
         if valid.empty:
-            st.warning("No valid levels found (needs Inside Bar levels). Use Top Ideas and wait for an Inside Bar trigger.")
+            st.warning("No READY trigger found (needs Inside Bar levels AND not already triggered). Use Top Ideas and wait for a new Inside Bar.")
         else:
             best = valid.iloc[0]
             st.success(
                 f"**{best['Ticker']}** | Bias: **{bias}** | TF: **{best['TF']}** | "
-                f"Trigger: **{best['TriggerStatus']}** | "
                 f"Entry: **{best['Entry']}** | Stop: **{best['Stop']}** | "
                 f"RR: **{best['RR']}** | ATR%: **{best['ATR%']}**"
             )
 
         st.markdown("### All Matches (ranked by TotalScore)")
-        st.dataframe(
-            cand_df[[
-                "Ticker","TriggerStatus","SetupScore","MagScore","TotalScore","TF","Entry","Stop","Room","RR","ATR%",
-                "W_Inside","D_Inside","W_212Up","D_212Up","W_212Dn","D_212Dn",
-                "M_Bull","W_Bull","D_Bull","M_Bear","W_Bear","D_Bear"
-            ]],
-            use_container_width=True,
-            hide_index=True
-        )
+        all_df = cand_df[[
+            "Ticker","TriggerStatus","SetupScore","MagScore","TotalScore","TF","Entry","Stop","Room","RR","ATR%",
+            "W_Inside","D_Inside","W_212Up","D_212Up","W_212Dn","D_212Dn",
+            "M_Bull","W_Bull","D_Bull","M_Bear","W_Bear","D_Bear"
+        ]]
+        all_styled = all_df.style.applymap(trigger_style, subset=["TriggerStatus"])
+        st.dataframe(all_styled, use_container_width=True, hide_index=True)
 
     st.subheader("Quick Market Read")
 
     if bias in ("LONG", "SHORT"):
-        rotation_in = [f"{r['Sector']}({r['ETF/Symbol']})" for _, r in sectors_df.head(3).iterrows()]
-        rotation_out = [f"{r['Sector']}({r['ETF/Symbol']})" for _, r in sectors_df.tail(3).iterrows()]
+        rotation_in = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.head(3).iterrows()]
+        rotation_out = [f"{r['Sector']}({r['ETF']})" for _, r in sectors_df.tail(3).iterrows()]
     else:
         rotation_in, rotation_out = [], []
 
@@ -1383,10 +1333,10 @@ def show_scanner():
         plan = "Plan: Defensive. Trade smaller, or wait for A+ triggers."
         badge = "🟠"
     elif bias == "LONG":
-        plan = "Plan: LONG only. Focus strong groups with triggers."
+        plan = "Plan: LONG only. Focus strong groups with READY triggers."
         badge = "🟢"
     else:
-        plan = "Plan: SHORT only. Focus weak groups with triggers."
+        plan = "Plan: SHORT only. Focus weak groups with READY triggers."
         badge = "🔴"
 
     st.write(
