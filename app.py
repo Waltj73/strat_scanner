@@ -1345,19 +1345,30 @@ def show_scanner():
         sectors_df["Dominance"] = (sectors_df["BullScore"] - sectors_df["BearScore"]).abs()
         sectors_df = sectors_df.sort_values("Dominance", ascending=False)
 
-    st.subheader("Sectors + Metals — ranked after bias is known")
-    st.dataframe(
-        sectors_df[[
-            "Sector","ETF","BullScore","BearScore",
-            "D_Bull","W_Bull","M_Bull","D_Bear","W_Bear","M_Bear",
-            "D_Inside","W_Inside","M_Inside",
-            "D_212Up","W_212Up","D_212Dn","W_212Dn"
-        ]],
-        use_container_width=True,
-        hide_index=True
-    )
+        st.subheader("Sectors + Metals — ranked after bias is known")
+
+    # --- Display sector table with green check marks ---
+    cols_wanted = [
+        "Sector","ETF","BullScore","BearScore",
+        "D_Bull","W_Bull","M_Bull",
+        "D_Bear","W_Bear","M_Bear",
+        "D_Inside","W_Inside","M_Inside",
+        "D_212Up","W_212Up",
+        "D_212Dn","W_212Dn"
+    ]
+
+    cols_present = [c for c in cols_wanted if c in sectors_df.columns]
+    display_df = sectors_df[cols_present].copy()
+
+    flag_cols = [c for c in cols_present if c not in ["Sector","ETF","BullScore","BearScore"]]
+
+    for c in flag_cols:
+        display_df[c] = display_df[c].apply(lambda v: "✅" if v is True else "")
+
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
 
     st.subheader("Drill into a group (ranks candidates in bias direction + magnitude)")
+
 
     sector_choice = st.selectbox("Choose a sector/metals group:", options=list(SECTOR_TICKERS.keys()), index=0)
     tickers = SECTOR_TICKERS.get(sector_choice, [])
