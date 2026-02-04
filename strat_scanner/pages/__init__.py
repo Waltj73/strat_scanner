@@ -1,2 +1,1 @@
-# pages package
-
+__all__ = ["scanner", "dashboard", "analyzer", "guide"]
