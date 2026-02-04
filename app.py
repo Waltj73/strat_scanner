@@ -1018,99 +1018,77 @@ def show_market_dashboard():
         with w5:
             strict_pullback = st.checkbox("Strict pullback filter (only show RSI-in-zone)", value=False)
 
-        st.subheader("Overall Market Sentiment")
-
-    # --- Helper: Market grade from SPY/QQQ/IWM/DIA (ignore VIX for grading) ---
-    def market_grade(trend_map: Dict[str, str], rsi_map: Dict[str, float], ret_map: Dict[str, float]) -> Tuple[str, str, int]:
-        core = ["SPY", "QQQ", "IWM", "DIA"]
-        ups = sum(1 for t in core if trend_map.get(t) == "UP")
-        dns = sum(1 for t in core if trend_map.get(t) != "UP")
-
-        rsi_vals = [rsi_map.get(t, 50.0) for t in core if np.isfinite(rsi_map.get(t, np.nan))]
-        ret_vals = [ret_map.get(t, 0.0) for t in core if np.isfinite(ret_map.get(t, np.nan))]
-
-        avg_rsi = float(np.mean(rsi_vals)) if rsi_vals else 50.0
-        avg_ret = float(np.mean(ret_vals)) if ret_vals else 0.0
-
-        # Strength score: simple, stable, intuitive
-        strength = int(np.clip(50 + (ups - dns) * 12 + (avg_rsi - 50) * 0.8 + (avg_ret * 100) * 0.6, 0, 100))
-
-        # Trend label
-        if ups >= 3:
-            trend = "UP"
-        elif dns >= 3:
-            trend = "DOWN"
-        else:
-            trend = "MIXED"
-
-        # Grade logic (simple)
-        if trend == "UP" and strength >= 70:
-            grade = "A"
-        elif trend == "DOWN" and strength >= 70:
-            grade = "A"
-        elif strength >= 55:
-            grade = "B"
-        else:
-            grade = "C"
-
-        return trend, grade, strength
-
+    st.subheader("Overall Market Sentiment")
     market_syms = list(MARKET_ETFS.values()) + ["^VIX"]
+    mcols = st.columns(len(market_syms))
 
-    # Collect stats so we can compute the grade box
-    trend_map: Dict[str, str] = {}
-    rsi_map: Dict[str, float] = {}
-    ret_map: Dict[str, float] = {}
-
-    # Layout: left = metrics grid, right = sentiment grade box
-    left, right = st.columns([3, 1])
-
-    with left:
-        mcols = st.columns(len(market_syms))
-        for i, sym in enumerate(market_syms):
-            d = get_hist(sym)
-            if d.empty:
-                with mcols[i]:
-                    st.metric(sym, "n/a", "n/a")
-                continue
-
-            close = d["Close"].dropna()
-            if close.empty or len(close) < 10:
-                with mcols[i]:
-                    st.metric(sym, "n/a", "n/a")
-                continue
-
-            tr = trend_label(close, int(ema_trend_len))
-            r = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
-            ret = float(total_return(close, int(rs_short)).iloc[-1]) if len(close) > rs_short else np.nan
-
-            trend_map[sym] = tr
-            rsi_map[sym] = r
-            ret_map[sym] = ret
-
+    for i, sym in enumerate(market_syms):
+        d = get_hist(sym)
+        if d.empty:
             with mcols[i]:
-                st.metric(sym, f"{close.iloc[-1]:.2f}", f"{(ret*100):.1f}%" if np.isfinite(ret) else "n/a")
-                st.write(f"Trend: **{tr}**")
-                st.write(f"RSI: **{r:.1f}**")
+                st.metric(sym, "n/a", "n/a")
+            continue
 
-    with right:
-        # Compute grade from SPY/QQQ/IWM/DIA only
-        trend, grade, strength = market_grade(trend_map, rsi_map, ret_map)
+        close = d["Close"].dropna()
+        if close.empty or len(close) < 10:
+            with mcols[i]:
+                st.metric(sym, "n/a", "n/a")
+            continue
 
-        badge = "🟢" if trend == "UP" else "🔴" if trend == "DOWN" else "🟠"
+        tr = trend_label(close, int(ema_trend_len))
+        r = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
+        ret = float(total_return(close, int(rs_short)).iloc[-1]) if len(close) > rs_short else np.nan
 
-        st.markdown("### Market Grade")
-        st.write(f"**Trend:** {badge} **{trend}**")
-        st.write(f"**Grade:** **{grade}**")
-        st.write(f"**Strength:** **{strength}/100**")
+        with mcols[i]:
+            st.metric(sym, f"{close.iloc[-1]:.2f}", f"{(ret*100):.1f}%" if np.isfinite(ret) else "n/a")
+            st.write(f"Trend: **{tr}**")
+            st.write(f"RSI: **{r:.1f}**")
 
-        if trend == "UP":
-            st.success("Lean LONG: focus leaders + triggers.")
-        elif trend == "DOWN":
-            st.error("Risk OFF: be defensive (or shorts only if you enable short logic).")
-        else:
-            st.warning("Mixed: trade smaller, wait for A+ triggers.")
+    spy_df = get_hist("SPY")
+    if spy_df.empty:
+        st.warning("SPY data unavailable; cannot compute RS vs SPY.")
+        return
 
+    spy = spy_df["Close"].dropna()
+    if len(spy) < (rs_long + 10):
+        st.warning("Not enough SPY history for these lookbacks.")
+        return
+
+    st.subheader("Sector / Metals Rotation + Strength (Relative Strength vs SPY)")
+    sector_rows = []
+    for name, etf in SECTOR_ETFS.items():
+        d = get_hist(etf)
+        if d.empty:
+            continue
+        close = d["Close"].dropna()
+        if len(close) < (rs_long + 10):
+            continue
+
+        rs_s = float(rs_vs_spy(close, spy, int(rs_short)).iloc[-1])
+        rs_l = float(rs_vs_spy(close, spy, int(rs_long)).iloc[-1])
+
+        rs_s_c = clamp_rs(rs_s, -RS_CAP, RS_CAP)
+        rs_l_c = clamp_rs(rs_l, -RS_CAP, RS_CAP)
+
+        rot = rs_s - rs_l
+        rot_c = clamp_rs(rot, -ROT_CAP, ROT_CAP)
+
+        tr = trend_label(close, int(ema_trend_len))
+        r = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
+
+        score = strength_meter(rs_s_c, rot_c, tr)
+
+        sector_rows.append({
+            "Group": name,
+            "ETF": etf,
+            "Strength": score,
+            "Meter": strength_label(score),
+            f"RS vs SPY ({rs_short})": rs_s,
+            f"RS vs SPY ({rs_long})": rs_l,
+            "Rotation (RS short - RS long)": rot,
+            "Trend": tr,
+            "RSI": r
+        })
 
     sectors = pd.DataFrame(sector_rows)
     if sectors.empty:
