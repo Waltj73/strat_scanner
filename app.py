@@ -862,6 +862,61 @@ def show_market_dashboard():
             st.write(f"Trend: **{tr}**")
             st.write(f"RSI: **{r:.1f}**")
 
+        # =========================
+    # MARKET GRADE (STRAT-BASED — does NOT require RS vs SPY)
+    # =========================
+    st.markdown("### Market Grade")
+
+    # Build market_rows using STRAT regime scoring (same logic as scanner)
+    market_rows: List[Dict] = []
+    for name, etf in MARKET_ETFS.items():
+        dfm = get_hist(etf)
+        if dfm.empty:
+            flags = {k: False for k in [
+                "D_Bull","W_Bull","M_Bull","D_Bear","W_Bear","M_Bear",
+                "D_Inside","W_Inside","M_Inside","D_212Up","W_212Up","D_212Dn","W_212Dn"
+            ]}
+            bull, bear = 0, 0
+        else:
+            d_tf, w_tf, m_tf = tf_frames(dfm)
+            flags = compute_flags(d_tf, w_tf, m_tf)
+            bull, bear = score_regime(flags)
+
+        row = {"Market": name, "ETF": etf, "BullScore": bull, "BearScore": bear}
+        row.update(flags)
+        market_rows.append(row)
+
+    bias, strength, diff = market_bias_and_strength(market_rows)
+
+    # Simple letter grade from strength (0-100)
+    if strength >= 80:
+        grade = "A"
+    elif strength >= 65:
+        grade = "B"
+    elif strength >= 50:
+        grade = "C"
+    elif strength >= 35:
+        grade = "D"
+    else:
+        grade = "F"
+
+    # Display box (right side feel)
+    g1, g2, g3 = st.columns([1.2, 1.2, 2.2])
+    with g1:
+        st.metric("Trend", bias)
+    with g2:
+        st.metric("Grade", grade)
+    with g3:
+        st.metric("Strength", f"{strength}/100", f"Bull–Bear diff: {diff}")
+
+    if bias == "MIXED" or strength < 50:
+        st.warning("Mixed: trade smaller, wait for A+ triggers.")
+    elif bias == "LONG":
+        st.success("Long conditions: focus strongest groups with triggers.")
+    else:
+        st.error("Short conditions: focus weakest groups with triggers.")
+
+
     # --- Try to load SPY for RS/Rotation sections ---
     spy_df = get_hist("SPY")
     if spy_df.empty:
