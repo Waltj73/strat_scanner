@@ -1,11 +1,6 @@
-# data.py — Data access & resampling layer
-# Handles:
-# - yfinance download
-# - MultiIndex cleanup
-# - datetime cleanup
-# - OHLC standardization
-# - caching
-# - resampling (weekly/monthly)
+# strat_scanner/data.py — data fetch + resampling (cloud-safe)
+
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
@@ -14,110 +9,86 @@ import yfinance as yf
 
 REQUIRED_COLS = ["Open", "High", "Low", "Close", "Volume"]
 
-
-# =========================
-# INTERNAL HELPERS
-# =========================
 def _ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure clean DatetimeIndex."""
     if df is None or df.empty:
         return pd.DataFrame()
-
     if not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df.index, errors="coerce")
-
     df = df[~df.index.isna()].copy()
-
     try:
         df.index = df.index.tz_localize(None)
     except Exception:
         pass
-
     df = df.sort_index()
     df = df[~df.index.duplicated(keep="last")]
-
     return df
-
-
-def _dedupe_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-
-    if df.columns.duplicated().any():
-        df = df.loc[:, ~df.columns.duplicated(keep="first")].copy()
-
-    return df
-
 
 def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
-    """
-    Flattens yfinance output so we always get:
-    Open, High, Low, Close, Volume
-    """
     if df is None or df.empty:
         return pd.DataFrame()
 
     df = _ensure_datetime_index(df)
+    if df.empty:
+        return pd.DataFrame()
 
+    # yfinance sometimes returns MultiIndex columns
     if isinstance(df.columns, pd.MultiIndex):
         lvl0 = df.columns.get_level_values(0)
         lvl1 = df.columns.get_level_values(1)
 
-        if ticker in set(lvl1):
-            df = df.xs(ticker, axis=1, level=1, drop_level=True)
-        elif ticker in set(lvl0):
-            df = df.xs(ticker, axis=1, level=0, drop_level=True)
+        if set(REQUIRED_COLS).issubset(set(lvl0)):
+            # columns like ("Open", "AAPL")
+            if ticker in set(lvl1):
+                df = df.xs(ticker, axis=1, level=1, drop_level=True)
+            else:
+                df.columns = [c[0] for c in df.columns]
+        elif set(REQUIRED_COLS).issubset(set(lvl1)):
+            # columns like ("AAPL", "Open")
+            if ticker in set(lvl0):
+                df = df.xs(ticker, axis=1, level=0, drop_level=True)
+            else:
+                df.columns = [c[1] for c in df.columns]
         else:
             df.columns = [c[0] for c in df.columns]
 
-    rename_map = {}
+    # normalize column names
+    rename = {}
     for c in df.columns:
         if not isinstance(c, str):
             continue
-
         lc = c.lower()
         if lc == "open":
-            rename_map[c] = "Open"
+            rename[c] = "Open"
         elif lc == "high":
-            rename_map[c] = "High"
+            rename[c] = "High"
         elif lc == "low":
-            rename_map[c] = "Low"
-        elif lc in ("close", "adj close", "adj_close"):
-            rename_map[c] = "Close"
+            rename[c] = "Low"
+        elif lc in ("close", "adj close", "adjclose", "adj_close"):
+            rename[c] = "Close"
         elif lc == "volume":
-            rename_map[c] = "Volume"
+            rename[c] = "Volume"
+    if rename:
+        df = df.rename(columns=rename)
 
-    df = df.rename(columns=rename_map)
-
-    # fallback for Close
+    # ensure required cols exist
     if "Close" not in df.columns:
-        for alt in ["Adj Close", "adj close", "AdjClose"]:
-            if alt in df.columns:
-                df["Close"] = df[alt]
-
+        return pd.DataFrame()
     if "Volume" not in df.columns:
-        df["Volume"] = 0
+        df["Volume"] = 0.0
 
-    needed = ["Open", "High", "Low", "Close", "Volume"]
-    if not set(needed).issubset(df.columns):
+    df = df[[c for c in REQUIRED_COLS if c in df.columns]].copy()
+    if not set(["Open", "High", "Low", "Close"]).issubset(df.columns):
         return pd.DataFrame()
 
-    df = df[needed].copy()
-    df = _dedupe_columns(df)
-
-    for c in needed:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+    for c in REQUIRED_COLS:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
 
     df = df.dropna(subset=["Open", "High", "Low", "Close"])
     return df
 
-
-# =========================
-# PUBLIC FUNCTIONS
-# =========================
 @st.cache_data(ttl=60 * 30, show_spinner=False)
 def get_hist(ticker: str, period: str = "3y") -> pd.DataFrame:
-    """Download historical data safely."""
     try:
         raw = yf.download(
             ticker,
@@ -130,36 +101,35 @@ def get_hist(ticker: str, period: str = "3y") -> pd.DataFrame:
         )
     except Exception:
         return pd.DataFrame()
-
     return _flatten_yf_columns(raw, ticker)
 
-
 def resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    """
-    Resample daily OHLC to weekly/monthly.
-    Example rules:
-        "W-FRI"
-        "M"
-    """
     if df is None or df.empty:
         return pd.DataFrame()
 
     df = _ensure_datetime_index(df)
-    df = _dedupe_columns(df)
+    if df.empty:
+        return pd.DataFrame()
 
     df = df.dropna(subset=["Open", "High", "Low", "Close"])
     if df.empty:
         return pd.DataFrame()
 
-    g = df.resample(rule)
+    def safe_first(x):
+        x = x.dropna()
+        return x.iloc[0] if len(x) else np.nan
 
+    def safe_last(x):
+        x = x.dropna()
+        return x.iloc[-1] if len(x) else np.nan
+
+    g = df.resample(rule)
     out = pd.DataFrame({
-        "Open": g["Open"].first(),
+        "Open": g["Open"].apply(safe_first),
         "High": g["High"].max(),
         "Low": g["Low"].min(),
-        "Close": g["Close"].last(),
+        "Close": g["Close"].apply(safe_last),
         "Volume": g["Volume"].sum(),
-    })
+    }).dropna(subset=["Open", "High", "Low", "Close"])
 
-    out = out.dropna(subset=["Open", "High", "Low", "Close"])
     return out
