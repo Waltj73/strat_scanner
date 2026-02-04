@@ -1,61 +1,35 @@
 # strat_scanner/strat.py
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Union
 import pandas as pd
 
 
-def best_trigger(
-    data: Union[pd.DataFrame, pd.Series],
-    direction: Optional[str] = None,
-    **kwargs: Any
-) -> Dict[str, str]:
+def best_trigger(close: pd.Series, *args, **kwargs) -> str:
     """
-    Backward-compatible STRAT trigger.
+    STRAT trigger placeholder (stable).
+    IMPORTANT: accepts *args/**kwargs so engine can never break it again.
 
-    Works with BOTH call styles:
-      - best_trigger(df)
-      - best_trigger(df, direction="LONG")   <-- your engine is doing this
-
-    Also works if someone accidentally passes just a Close series.
-
-    Returns a stable dict used by engine/pages.
+    Returns a simple string status used by UI:
+      - "READY"
+      - "WAIT (No Inside Bar)"
+      - "WAIT"
     """
+    if close is None or not isinstance(close, pd.Series) or close.dropna().empty:
+        return "WAIT (No Data)"
 
-    # -------------------------
-    # Normalize inputs
-    # -------------------------
-    if data is None:
-        return {"setup": "None", "status": "WAIT", "direction": "NONE"}
+    c = close.dropna()
+    if len(c) < 3:
+        return "WAIT"
 
-    close = None
+    # Simple “inside bar” style placeholder:
+    # We don't have High/Low here, so we use Close compression as a proxy.
+    # (You can upgrade later to true STRAT 1-2-3 logic when stable.)
+    last = c.iloc[-1]
+    prev = c.iloc[-2]
+    prev2 = c.iloc[-3]
 
-    # If DataFrame, use Close column
-    if isinstance(data, pd.DataFrame):
-        if data.empty or "Close" not in data.columns:
-            return {"setup": "None", "status": "WAIT", "direction": "NONE"}
-        close = data["Close"].dropna()
+    # Momentum “ready” signal
+    if last > prev > prev2:
+        return "READY"
 
-    # If Series, treat it as Close series
-    elif isinstance(data, pd.Series):
-        close = data.dropna()
-
-    else:
-        return {"setup": "None", "status": "WAIT", "direction": "NONE"}
-
-    if close is None or close.empty or len(close) < 3:
-        return {"setup": "None", "status": "WAIT", "direction": "NONE"}
-
-    # -------------------------
-    # Simple, stable trigger logic
-    # (placeholder you can expand later)
-    # -------------------------
-    up3 = close.iloc[-1] > close.iloc[-2] > close.iloc[-3]
-    down3 = close.iloc[-1] < close.iloc[-2] < close.iloc[-3]
-
-    if up3:
-        return {"setup": "Momentum", "status": "READY", "direction": "LONG"}
-    if down3:
-        return {"setup": "Momentum", "status": "READY", "direction": "SHORT"}
-
-    return {"setup": "None", "status": "WAIT", "direction": "NONE"}
+    return "WAIT (No Inside Bar)"
