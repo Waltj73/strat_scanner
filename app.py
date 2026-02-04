@@ -455,6 +455,39 @@ def best_trigger(bias: str, d: pd.DataFrame, w: pd.DataFrame) -> Tuple[Optional[
 
     return None, None, None
 
+def rotation_lists_from_sectors(sectors_df: pd.DataFrame, bias: str, top_n: int = 3) -> Tuple[List[str], List[str]]:
+    """
+    Returns Rotation IN and Rotation OUT lists as formatted strings.
+    Uses STRAT regime scores from sectors_df (BullScore/BearScore).
+    """
+    if sectors_df is None or sectors_df.empty:
+        return [], []
+
+    df = sectors_df.copy()
+
+    # rank depending on bias
+    if bias == "LONG":
+        df = df.sort_values(["BullScore", "BearScore"], ascending=[False, True])
+    elif bias == "SHORT":
+        df = df.sort_values(["BearScore", "BullScore"], ascending=[False, True])
+    else:
+        # Mixed: use absolute dominance (distance from balanced)
+        df["Dominance"] = (df["BullScore"] - df["BearScore"]).abs()
+        df = df.sort_values("Dominance", ascending=False)
+
+    top = df.head(top_n)
+    bot = df.tail(top_n)
+
+    def fmt_row(r):
+        # show both bull/bear so you can see why it ranked
+        return f"{r['Sector']} ({r['ETF']}) — Bull {int(r['BullScore'])} / Bear {int(r['BearScore'])}"
+
+    rotation_in = [fmt_row(r) for _, r in top.iterrows()]
+    rotation_out = [fmt_row(r) for _, r in bot.iterrows()]
+
+    return rotation_in, rotation_out
+
+
 # =========================
 # TRADE PLAN NOTES
 # =========================
@@ -1481,6 +1514,23 @@ def show_scanner():
         f"Bull–Bear diff: **{bull_bear_diff}**"
     )
     st.success(plan)
+
+    # =========================
+    # ROTATION IN / OUT (STRAT-based)
+    # =========================
+    rotation_in, rotation_out = rotation_lists_from_sectors(sectors_df, bias, top_n=3)
+
+    if rotation_in:
+        st.markdown("### 🔄 Rotation IN")
+        for x in rotation_in:
+            st.write(f"✅ {x}")
+
+    if rotation_out:
+        st.markdown("### 🔁 Rotation OUT")
+        for x in rotation_out:
+            st.write(f"❌ {x}")
+
+
 
 # =========================
 # SIDEBAR NAV
