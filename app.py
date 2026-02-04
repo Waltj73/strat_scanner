@@ -703,23 +703,231 @@ def writeup_block(info: Dict, pb_low: float, pb_high: float) -> None:
 # PAGES
 # =========================
 def show_user_guide():
-    st.title("📘 STRAT Regime Scanner — User Guide (V1.3.0)")
+    st.title("📘 STRAT Regime Scanner — Complete User Guide (V1.2)")
+
     st.markdown("""
-## What this app does
-- **Scanner**: STRAT regime + inside bar triggers + ranked trade ideas
-- **Market Dashboard**: overall sentiment + sector rotation + strength leaders
-- **Today Watchlist**: auto-builds a list of names based on rotation/strength + filters
-- **Ticker Analyzer**: type any ticker and see exactly why it is scoring the way it is
-- **Trade Plan Notes**: A/B/C grade + targets + invalidation + what makes it better
+## Welcome — What This Tool Is Designed To Do
+
+The STRAT Regime Scanner organizes the market into a clear decision process so you are not randomly picking trades.  
+It guides you from:
+
+Market Bias → Sector Rotation → Stock Leadership → Pullback → STRAT Trigger → Execution.
+
+Instead of guessing, you trade where money is already flowing.
 
 ---
 
-## How to use (2–5 min)
-1) Market Dashboard → **Top Groups IN**
-2) Today Watchlist → **pick 3–10 tickers**
-3) Open write-ups → take only **A/B** ideas
-4) Enter only on **Inside Bar trigger** (or wait)
+## App Structure Overview
+
+### STRAT Regime Scanner
+This is your execution engine.
+
+It determines:
+- Market bias
+- Sector alignment
+- Stocks with setups forming
+- Inside bar trigger entries
+- Entry & stop levels
+
+If the scanner shows entry and stop levels, the trade is actionable.  
+If not, the correct action is to wait.
+
+---
+
+### Market Dashboard
+The dashboard answers:
+
+“Where is money flowing?”
+
+It shows:
+- Market sentiment
+- Sector & metals rotation
+- Relative strength leaders
+- Momentum improvement or deterioration
+
+The dashboard guides where to look.  
+The scanner decides when to act.
+
+---
+
+### Today Watchlist Builder
+The watchlist is built automatically each day by:
+
+1. Finding sectors rotating into strength
+2. Selecting strongest stocks inside them
+3. Filtering by trend + pullback quality
+4. Checking STRAT trigger readiness
+5. Showing trade-plan notes
+
+This becomes your daily focus list.
+
+---
+
+### Ticker Analyzer
+Type any ticker and see:
+
+- Trend condition
+- RSI state
+- Relative strength vs SPY
+- Rotation behavior
+- STRAT alignment
+- Trigger readiness
+- Trade plan explanation
+
+This explains WHY a stock is or isn't attractive.
+
+---
+
+## Strength Score Explained
+
+Strength combines:
+
+• Relative strength vs SPY  
+• Rotation improvement  
+• Trend direction  
+• Momentum persistence  
+
+Scores are capped so extreme moves don't distort rankings.
+
+Interpretation:
+
+- 70–100 → Strong leadership
+- 45–69 → Neutral
+- 0–44 → Weak
+
+Leadership stocks trend better and follow through more reliably.
+
+---
+
+## Rotation Explained
+
+Rotation measures:
+
+Short-term strength minus long-term strength.
+
+Positive rotation = money flowing in.  
+Negative rotation = money flowing out.
+
+This shows who is gaining leadership right now.
+
+---
+
+## RSI Pullback Zones
+
+Strong trends move:
+
+Trend → Pullback → Continuation.
+
+Default pullback zone:
+
+RSI between 40 and 55.
+
+Meaning:
+- Trend intact
+- Pullback occurred
+- Continuation likely
+
+---
+
+## STRAT Trigger Logic
+
+LONG setup:
+- Entry: break of Inside Bar HIGH
+- Stop: below Inside Bar LOW
+
+SHORT setup:
+- Entry: break of Inside Bar LOW
+- Stop: above Inside Bar HIGH
+
+Weekly triggers are stronger than daily.
+
+If no inside bar exists, the system correctly tells you to wait.
+
+---
+
+## Trade Plan Notes
+
+Each ticker now includes:
+
+### What makes it attractive
+Examples:
+- Leadership strength
+- Improving rotation
+- Trend alignment
+- Pullback completion
+- Trigger formation
+
+### What invalidates it
+Examples:
+- Breakdown below structure
+- Leadership failure
+- Loss of trend
+
+### What to wait for
+Examples:
+- Inside bar formation
+- Pullback completion
+- Alignment improvement
+
+This mirrors how professional traders plan trades.
+
+---
+
+## Recommended Daily Workflow
+
+1. Open Market Dashboard
+2. Identify sectors rotating IN
+3. Review Today Watchlist
+4. Expand ticker write-ups
+5. Execute only valid triggers
+
+Total time: 2–5 minutes.
+
+---
+
+## When Dashboard and Scanner Disagree
+
+If a sector looks strong but setups are weak:
+
+Money is flowing in, but setups aren't ready yet.
+
+Execution decisions always come from the scanner.
+
+---
+
+## Best Default Settings
+
+Swing trading defaults:
+
+RS short: 21  
+RS long: 63  
+Trend EMA: 50  
+RSI length: 14  
+Pullback zone: 40–55
+
+---
+
+## Final Goal
+
+Workflow becomes:
+
+Market Bias  
+↓  
+Sector Rotation  
+↓  
+Stock Leadership  
+↓  
+Pullback Entry  
+↓  
+STRAT Trigger  
+↓  
+Execution  
+
+The goal is fewer, higher-quality trades — not more trades.
+
+Consistency comes from process, not prediction.
 """)
+
 
 def show_market_dashboard():
     st.title("📊 Market Dashboard (Sentiment • Rotation • Leaders • Watchlist) — V1.3.0")
