@@ -77,13 +77,43 @@ SECTOR_TICKERS: Dict[str, List[str]] = {
 REQUIRED_COLS = ["Open", "High", "Low", "Close", "Volume"]
 
 # =========================
+# UI HELPERS: GREEN CHECK MARKS
+# =========================
+def flag_check(v) -> str:
+    """
+    Convert any truthy boolean (including numpy.bool_) into a green check emoji.
+    Everything else => blank.
+    """
+    try:
+        if pd.isna(v):
+            return ""
+    except Exception:
+        pass
+
+    try:
+        return "✅" if bool(v) else ""
+    except Exception:
+        return ""
+
+def flags_to_checks_df(df: pd.DataFrame, non_flag_cols: List[str]) -> pd.DataFrame:
+    """
+    Returns a copy of df where all columns NOT in non_flag_cols are rendered as ✅ / ''.
+    Use for DISPLAY ONLY (keep original df for logic).
+    """
+    out = df.copy()
+    for c in out.columns:
+        if c in non_flag_cols:
+            continue
+        out[c] = out[c].apply(flag_check)
+    return out
+
+# =========================
 # SESSION HELPERS
 # =========================
 def goto_page(page_name: str):
     st.session_state["__page"] = page_name
 
 def page_selector(pages: List[str], default: str) -> str:
-    # Keep user on a page after button-driven navigation
     if "__page" not in st.session_state:
         st.session_state["__page"] = default
     if st.session_state["__page"] not in pages:
@@ -263,8 +293,8 @@ def clamp_rs(x, lo, hi):
     except Exception:
         return 0.0
 
-RS_CAP = 0.10      # ±10% cap for RS vs SPY
-ROT_CAP = 0.08     # ±8% cap for Rotation
+RS_CAP = 0.10
+ROT_CAP = 0.08
 
 def strength_meter(rs_short_v: float, rotation_v: float, trend: str) -> int:
     rs_short_v = clamp_rs(rs_short_v, -RS_CAP, RS_CAP)
@@ -456,22 +486,16 @@ def best_trigger(bias: str, d: pd.DataFrame, w: pd.DataFrame) -> Tuple[Optional[
     return None, None, None
 
 def rotation_lists_from_sectors(sectors_df: pd.DataFrame, bias: str, top_n: int = 3) -> Tuple[List[str], List[str]]:
-    """
-    Returns Rotation IN and Rotation OUT lists as formatted strings.
-    Uses STRAT regime scores from sectors_df (BullScore/BearScore).
-    """
     if sectors_df is None or sectors_df.empty:
         return [], []
 
     df = sectors_df.copy()
 
-    # rank depending on bias
     if bias == "LONG":
         df = df.sort_values(["BullScore", "BearScore"], ascending=[False, True])
     elif bias == "SHORT":
         df = df.sort_values(["BearScore", "BullScore"], ascending=[False, True])
     else:
-        # Mixed: use absolute dominance (distance from balanced)
         df["Dominance"] = (df["BullScore"] - df["BearScore"]).abs()
         df = df.sort_values("Dominance", ascending=False)
 
@@ -479,14 +503,12 @@ def rotation_lists_from_sectors(sectors_df: pd.DataFrame, bias: str, top_n: int 
     bot = df.tail(top_n)
 
     def fmt_row(r):
-        # show both bull/bear so you can see why it ranked
         return f"{r['Sector']} ({r['ETF']}) — Bull {int(r['BullScore'])} / Bear {int(r['BearScore'])}"
 
     rotation_in = [fmt_row(r) for _, r in top.iterrows()]
     rotation_out = [fmt_row(r) for _, r in bot.iterrows()]
 
     return rotation_in, rotation_out
-
 
 # =========================
 # TRADE PLAN NOTES
@@ -1348,7 +1370,8 @@ def show_scanner():
         "D_Bear","W_Bear","M_Bear",
         "D_212Up","W_212Up","D_212Dn","W_212Dn"
     ]]
-    st.dataframe(market_df, use_container_width=True, hide_index=True)
+    market_df_disp = flags_to_checks_df(market_df, non_flag_cols=["Market","ETF"])
+    st.dataframe(market_df_disp, use_container_width=True, hide_index=True)
 
     sector_rows: List[Dict] = []
     for sector, etf in SECTOR_ETFS.items():
@@ -1378,9 +1401,8 @@ def show_scanner():
         sectors_df["Dominance"] = (sectors_df["BullScore"] - sectors_df["BearScore"]).abs()
         sectors_df = sectors_df.sort_values("Dominance", ascending=False)
 
-        st.subheader("Sectors + Metals — ranked after bias is known")
+    st.subheader("Sectors + Metals — ranked after bias is known")
 
-    # --- Display sector table with green check marks ---
     cols_wanted = [
         "Sector","ETF","BullScore","BearScore",
         "D_Bull","W_Bull","M_Bull",
@@ -1389,19 +1411,14 @@ def show_scanner():
         "D_212Up","W_212Up",
         "D_212Dn","W_212Dn"
     ]
-
     cols_present = [c for c in cols_wanted if c in sectors_df.columns]
     display_df = sectors_df[cols_present].copy()
 
-    flag_cols = [c for c in cols_present if c not in ["Sector","ETF","BullScore","BearScore"]]
-
-    for c in flag_cols:
-        display_df[c] = display_df[c].apply(lambda v: "✅" if v is True else "")
-
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    # Convert ALL flag columns to green checks for display
+    display_df_disp = flags_to_checks_df(display_df, non_flag_cols=["Sector","ETF","BullScore","BearScore"])
+    st.dataframe(display_df_disp, use_container_width=True, hide_index=True)
 
     st.subheader("Drill into a group (ranks candidates in bias direction + magnitude)")
-
 
     sector_choice = st.selectbox("Choose a sector/metals group:", options=list(SECTOR_TICKERS.keys()), index=0)
     tickers = SECTOR_TICKERS.get(sector_choice, [])
@@ -1471,7 +1488,10 @@ def show_scanner():
             "W_212Up","D_212Up","M_Bull","W_Bull","D_Bull","W_Inside","D_Inside",
             "W_212Dn","D_212Dn","M_Bear","W_Bear","D_Bear"
         ]]
-        st.dataframe(top_df, use_container_width=True, hide_index=True)
+        top_df_disp = flags_to_checks_df(top_df, non_flag_cols=[
+            "Ticker","TriggerStatus","TotalScore","SetupScore","MagScore","TF","Entry","Stop","Room","RR","ATR%"
+        ])
+        st.dataframe(top_df_disp, use_container_width=True, hide_index=True)
 
         st.markdown("### 🎯 Trade of the Day (best TotalScore + valid trigger)")
         valid = cand_df.dropna(subset=["Entry","Stop","RR"]).copy()
@@ -1487,15 +1507,15 @@ def show_scanner():
             )
 
         st.markdown("### All Matches (ranked by TotalScore)")
-        st.dataframe(
-            cand_df[[
-                "Ticker","TriggerStatus","SetupScore","MagScore","TotalScore","TF","Entry","Stop","Room","RR","ATR%",
-                "W_Inside","D_Inside","W_212Up","D_212Up","W_212Dn","D_212Dn",
-                "M_Bull","W_Bull","D_Bull","M_Bear","W_Bear","D_Bear"
-            ]],
-            use_container_width=True,
-            hide_index=True
-        )
+        all_df = cand_df[[
+            "Ticker","TriggerStatus","SetupScore","MagScore","TotalScore","TF","Entry","Stop","Room","RR","ATR%",
+            "W_Inside","D_Inside","W_212Up","D_212Up","W_212Dn","D_212Dn",
+            "M_Bull","W_Bull","D_Bull","M_Bear","W_Bear","D_Bear"
+        ]]
+        all_df_disp = flags_to_checks_df(all_df, non_flag_cols=[
+            "Ticker","TriggerStatus","SetupScore","MagScore","TotalScore","TF","Entry","Stop","Room","RR","ATR%"
+        ])
+        st.dataframe(all_df_disp, use_container_width=True, hide_index=True)
 
     st.subheader("Quick Market Read")
     if bias == "MIXED" or strength < 50:
@@ -1515,9 +1535,6 @@ def show_scanner():
     )
     st.success(plan)
 
-    # =========================
-    # ROTATION IN / OUT (STRAT-based)
-    # =========================
     rotation_in, rotation_out = rotation_lists_from_sectors(sectors_df, bias, top_n=3)
 
     if rotation_in:
@@ -1530,20 +1547,14 @@ def show_scanner():
         for x in rotation_out:
             st.write(f"❌ {x}")
 
-
-
 # =========================
 # SIDEBAR NAV
 # =========================
 st.sidebar.title("Navigation")
-
 show_market_dash = st.sidebar.toggle("Enable Market Dashboard", value=True)
 
 pages = ["Scanner", "📘 User Guide", "🔎 Ticker Analyzer", "🧾 STRAT Cheat Sheet"]
-if not show_market_dash:
-    # remove dashboard if disabled
-    pass
-else:
+if show_market_dash:
     pages.insert(1, "📊 Market Dashboard")
 
 page = page_selector(pages, default="Scanner")
