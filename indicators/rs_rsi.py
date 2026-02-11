@@ -43,8 +43,8 @@ def strength_score(rs_short: float, rs_long: float, rsi: float, trend: str) -> i
     - RS short & long are returns relative to SPY.
     - Rotation is (RS short - RS long).
     """
-    RS_CAP = 0.10   # cap at +/-10% to avoid crazy outliers
-    ROT_CAP = 0.08  # cap at +/-8%
+    RS_CAP = 0.10   # +/-10%
+    ROT_CAP = 0.08  # +/-8%
 
     rs_s = clamp(rs_short, -RS_CAP, RS_CAP)
     rs_l = clamp(rs_long, -RS_CAP, RS_CAP)
@@ -52,10 +52,50 @@ def strength_score(rs_short: float, rs_long: float, rsi: float, trend: str) -> i
 
     rs_part  = np.clip(50 + rs_s*100*6.0, 0, 100)
     rot_part = np.clip(50 + rot*100*8.0, 0, 100)
-    rsi_part = np.clip(rsi, 0, 100)
+    rsi_part = np.clip(float(rsi), 0, 100)
 
     trend_bonus = 8 if trend == "UP" else -8
 
     score = 0.45*rs_part + 0.35*rot_part + 0.20*rsi_part + trend_bonus
     return int(np.clip(score, 0, 100))
 
+def strength_trend(
+    close: pd.Series,
+    spy_close: pd.Series,
+    rs_short: int,
+    rs_long: int,
+    ema_len: int,
+    rsi_len: int,
+    lookback_bars: int = 5,   # ~1 trading week
+) -> float:
+    """
+    Strength trend = strength(today) - strength(N bars ago).
+    Uses same Strength formula, computed at two different timestamps.
+    """
+    if close is None or close.empty or spy_close is None or spy_close.empty:
+        return float("nan")
+    if len(close) < (max(rs_long, ema_len, rsi_len) + lookback_bars + 10):
+        return float("nan")
+    if len(spy_close) < (max(rs_long, ema_len, rsi_len) + lookback_bars + 10):
+        return float("nan")
+
+    # today
+    rsi_today = float(rsi_wilder(close, rsi_len).iloc[-1])
+    tr_today = trend_label(close, ema_len)
+    rs_s_today = rs_vs_spy(close, spy_close, rs_short)
+    rs_l_today = rs_vs_spy(close, spy_close, rs_long)
+    s_today = strength_score(rs_s_today, rs_l_today, rsi_today, tr_today)
+
+    # N bars ago
+    close_prev = close.iloc[:-lookback_bars]
+    spy_prev = spy_close.iloc[:-lookback_bars]
+    if close_prev.empty or spy_prev.empty:
+        return float("nan")
+
+    rsi_prev = float(rsi_wilder(close_prev, rsi_len).iloc[-1])
+    tr_prev = trend_label(close_prev, ema_len)
+    rs_s_prev = rs_vs_spy(close_prev, spy_prev, rs_short)
+    rs_l_prev = rs_vs_spy(close_prev, spy_prev, rs_long)
+    s_prev = strength_score(rs_s_prev, rs_l_prev, rsi_prev, tr_prev)
+
+    return float(s_today - s_prev)
