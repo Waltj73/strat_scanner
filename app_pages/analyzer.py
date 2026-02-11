@@ -3,13 +3,13 @@ import streamlit as st
 import plotly.graph_objects as go
 
 from data.fetch import get_hist
-from indicators.rs_rsi import rsi_wilder, rs_vs_spy, trend_label, strength_score
+from indicators.rs_rsi import rsi_wilder, rs_vs_spy, trend_label, strength_score, strength_trend
 
 def analyzer_main():
     st.title("🔎 Ticker Analyzer (RSI/RS-only)")
 
     with st.expander("Settings", expanded=True):
-        c1,c2,c3,c4 = st.columns(4)
+        c1,c2,c3,c4,c5 = st.columns(5)
         with c1:
             ticker = st.text_input("Ticker", value="AAPL").strip().upper()
         with c2:
@@ -18,8 +18,10 @@ def analyzer_main():
             rs_long = st.selectbox("RS long", [63,90,126], index=0)
         with c4:
             ema_len = st.selectbox("Trend EMA", [50,100,200], index=0)
+        with c5:
+            rsi_len = st.selectbox("RSI length", [7,14,21], index=1)
 
-        rsi_len = st.selectbox("RSI length", [7,14,21], index=1)
+        lookback_bars = st.selectbox("StrengthTrend lookback (bars)", [5,10], index=0)
 
     spy = get_hist("SPY")
     if spy.empty:
@@ -40,13 +42,16 @@ def analyzer_main():
     rot  = rs_s - rs_l
 
     score = strength_score(rs_s, rs_l, rsi, tr)
+    s_trend = strength_trend(close, spy_close, int(rs_short), int(rs_long), int(ema_len), int(rsi_len), int(lookback_bars))
 
     st.subheader(f"{ticker} — Strength {score}/100")
-    c1,c2,c3,c4 = st.columns(4)
+
+    c1,c2,c3,c4,c5 = st.columns(5)
     c1.metric("Trend", tr)
     c2.metric(f"RS({rs_short})", f"{rs_s*100:.1f}%")
     c3.metric("Rotation", f"{rot*100:.1f}%")
     c4.metric(f"RSI({rsi_len})", f"{rsi:.1f}")
+    c5.metric("StrengthTrend", f"{s_trend:+.0f}")
 
     st.markdown("### Chart")
     bars = df.tail(220)
@@ -58,9 +63,8 @@ def analyzer_main():
 
     st.markdown("### How to read this")
     st.write(
-        "- **Trend** is price vs EMA and EMA slope.\n"
-        "- **RS(short/long)** is return vs SPY over that lookback.\n"
-        "- **Rotation** = RS(short) − RS(long). Positive means improving leadership.\n"
-        "- **Strength** mixes RS + Rotation + RSI + Trend bonus into 0–100."
+        "- **Trend**: price above EMA and EMA rising.\n"
+        "- **RS(short/long)**: returns vs SPY over those windows.\n"
+        "- **Rotation**: RS(short) − RS(long). Positive = improving leadership.\n"
+        "- **StrengthTrend**: Strength(today) minus Strength(~1 week ago). Positive = strengthening."
     )
-
