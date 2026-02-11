@@ -6,7 +6,10 @@ import plotly.graph_objects as go
 
 from config.universe import MARKET_ETFS, SECTOR_ETFS, SECTOR_TICKERS
 from data.fetch import get_hist
-from indicators.rs_rsi import rsi_wilder, rs_vs_spy, trend_label, strength_score
+from indicators.rs_rsi import (
+    rsi_wilder, rs_vs_spy, trend_label,
+    strength_score, strength_trend
+)
 
 def _meter(score: int) -> str:
     if score >= 70: return "STRONG"
@@ -14,8 +17,6 @@ def _meter(score: int) -> str:
     return "WEAK"
 
 def _rotation_in_out(df: pd.DataFrame, n: int, bias: str):
-    # bias LONG: IN = highest rotation, OUT = lowest rotation
-    # bias SHORT: IN = lowest rotation (most negative), OUT = highest
     if df.empty:
         return df, df
     if bias == "SHORT":
@@ -46,13 +47,32 @@ def rsi_dashboard_main():
         with c4:
             rsi_len = st.selectbox("RSI length", [7,14,21], index=1)
 
-        c5,c6,c7 = st.columns(3)
+        c5,c6,c7,c8 = st.columns(4)
         with c5:
-            top_sectors = st.slider("Top sectors to show", 3, 11, 6)
+            top_sectors = st.slider("Top sectors to scan for leaders", 3, 11, 6)
         with c6:
             leaders_per_sector = st.slider("Leaders per sector", 3, 10, 5)
         with c7:
             rotation_n = st.slider("Rotation IN/OUT count", 3, 8, 5)
+        with c8:
+            strength_week_lookback = st.selectbox("StrengthTrend lookback (bars)", [5, 10], index=0)
+
+        st.markdown("### A+ Leader Rules (editable)")
+        a1,a2,a3,a4 = st.columns(4)
+        with a1:
+            aplus_strength = st.slider("Min Strength", 60, 90, 75)
+        with a2:
+            require_trend_up = st.checkbox("Require Trend UP", value=True)
+        with a3:
+            require_rot_pos = st.checkbox("Require Rotation > 0", value=True)
+        with a4:
+            use_rsi_pullback = st.checkbox("Require RSI Pullback Window", value=True)
+
+        pb1,pb2 = st.columns(2)
+        with pb1:
+            pb_low = st.slider("RSI Pullback Low", 20, 60, 40)
+        with pb2:
+            pb_high = st.slider("RSI Pullback High", 35, 80, 55)
 
     spy_df = get_hist("SPY")
     if spy_df.empty:
@@ -71,17 +91,17 @@ def rsi_dashboard_main():
         if d.empty:
             continue
         close = d["Close"].dropna()
-        if close.empty or len(close) < (rs_long + 10):
+        if close.empty or len(close) < (rs_long + 15):
             continue
 
         rsi = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
         tr  = trend_label(close, int(ema_len))
-
         rs_s = float(rs_vs_spy(close, spy_close, int(rs_short)))
         rs_l = float(rs_vs_spy(close, spy_close, int(rs_long)))
         rot  = rs_s - rs_l
-
         score = strength_score(rs_s, rs_l, rsi, tr)
+        s_trend = strength_trend(close, spy_close, int(rs_short), int(rs_long), int(ema_len), int(rsi_len), int(strength_week_lookback))
+
         market_rows.append({
             "Name": name,
             "Ticker": sym,
@@ -91,6 +111,7 @@ def rsi_dashboard_main():
             f"RS({rs_long})": rs_l,
             "Rotation": rot,
             "Strength": score,
+            "StrengthTrend": s_trend,
             "Meter": _meter(score),
         })
 
@@ -105,12 +126,12 @@ def rsi_dashboard_main():
             f"RS({rs_short})": "{:.2%}",
             f"RS({rs_long})": "{:.2%}",
             "Rotation": "{:.2%}",
+            "StrengthTrend": "{:+.0f}",
         }),
         use_container_width=True,
         hide_index=True
     )
 
-    # Simple overall bias: based on SPY+QQQ+IWM+DIA strength average
     core = mdf[mdf["Ticker"].isin(["SPY","QQQ","IWM","DIA"])].copy()
     core_strength = float(core["Strength"].mean()) if not core.empty else 50.0
     bias = "LONG" if core_strength >= 55 else "SHORT" if core_strength <= 45 else "MIXED"
@@ -125,7 +146,7 @@ def rsi_dashboard_main():
     # ======================
     # Sector Rotation
     # ======================
-    st.subheader("Sector Rotation (RS vs SPY + Rotation + Strength)")
+    st.subheader("Sector Rotation (RS vs SPY + Rotation + Strength + StrengthTrend)")
 
     sector_rows = []
     for sector, etf in SECTOR_ETFS.items():
@@ -133,7 +154,7 @@ def rsi_dashboard_main():
         if d.empty:
             continue
         close = d["Close"].dropna()
-        if close.empty or len(close) < (rs_long + 10):
+        if close.empty or len(close) < (rs_long + 15):
             continue
 
         rsi = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
@@ -142,6 +163,7 @@ def rsi_dashboard_main():
         rs_l = float(rs_vs_spy(close, spy_close, int(rs_long)))
         rot  = rs_s - rs_l
         score = strength_score(rs_s, rs_l, rsi, tr)
+        s_trend = strength_trend(close, spy_close, int(rs_short), int(rs_long), int(ema_len), int(rsi_len), int(strength_week_lookback))
 
         sector_rows.append({
             "Sector": sector,
@@ -152,6 +174,7 @@ def rsi_dashboard_main():
             f"RS({rs_long})": rs_l,
             "Rotation": rot,
             "Strength": score,
+            "StrengthTrend": s_trend,
             "Meter": _meter(score),
         })
 
@@ -168,6 +191,7 @@ def rsi_dashboard_main():
             f"RS({rs_short})": "{:.2%}",
             f"RS({rs_long})": "{:.2%}",
             "Rotation": "{:.2%}",
+            "StrengthTrend": "{:+.0f}",
         }),
         use_container_width=True,
         hide_index=True,
@@ -179,34 +203,37 @@ def rsi_dashboard_main():
     with c1:
         st.markdown("### 🔁 Rotation IN")
         for _, r in rot_in.iterrows():
-            st.write(f"✅ **{r['Sector']}** ({r['ETF']}) — Rot {r['Rotation']:.2%} | Strength {int(r['Strength'])}")
+            st.write(f"✅ **{r['Sector']}** ({r['ETF']}) — Rot {r['Rotation']:.2%} | Strength {int(r['Strength'])} | Δ {r['StrengthTrend']:+.0f}")
     with c2:
         st.markdown("### 🔁 Rotation OUT")
         for _, r in rot_out.iterrows():
-            st.write(f"❌ **{r['Sector']}** ({r['ETF']}) — Rot {r['Rotation']:.2%} | Strength {int(r['Strength'])}")
+            st.write(f"❌ **{r['Sector']}** ({r['ETF']}) — Rot {r['Rotation']:.2%} | Strength {int(r['Strength'])} | Δ {r['StrengthTrend']:+.0f}")
 
     # ======================
-    # Leaders
+    # Leaders + A+ Leaders
     # ======================
-    st.subheader("✅ Leaders (top tickers from top sectors)")
+    st.subheader("✅ Leaders (top tickers from top sectors) + ⭐ A+ Leaders")
+
     top_groups = sdf.head(int(top_sectors))["Sector"].tolist()
 
     leaders = []
     for sector in top_groups:
         names = SECTOR_TICKERS.get(sector, [])
-        for t in names[:30]:
+        for t in names[:40]:
             d = get_hist(t)
             if d.empty:
                 continue
             close = d["Close"].dropna()
-            if close.empty or len(close) < (rs_long + 10):
+            if close.empty or len(close) < (rs_long + 15):
                 continue
+
             rsi = float(rsi_wilder(close, int(rsi_len)).iloc[-1])
             tr  = trend_label(close, int(ema_len))
             rs_s = float(rs_vs_spy(close, spy_close, int(rs_short)))
             rs_l = float(rs_vs_spy(close, spy_close, int(rs_long)))
             rot  = rs_s - rs_l
             score = strength_score(rs_s, rs_l, rsi, tr)
+            s_trend = strength_trend(close, spy_close, int(rs_short), int(rs_long), int(ema_len), int(rsi_len), int(strength_week_lookback))
 
             leaders.append({
                 "Sector": sector,
@@ -216,6 +243,7 @@ def rsi_dashboard_main():
                 f"RS({rs_short})": rs_s,
                 "Rotation": rot,
                 "Strength": score,
+                "StrengthTrend": s_trend,
                 "Meter": _meter(score),
             })
 
@@ -224,22 +252,66 @@ def rsi_dashboard_main():
         st.info("No leaders found (yfinance returned empty).")
         return
 
-    ldf = ldf.sort_values(["Strength","Rotation"], ascending=[False, False])
-    ldf = ldf.groupby("Sector").head(int(leaders_per_sector)).reset_index(drop=True)
+    # Leaders table
+    ldf_sorted = ldf.sort_values(["Strength","Rotation"], ascending=[False, False])
+    leaders_df = ldf_sorted.groupby("Sector").head(int(leaders_per_sector)).reset_index(drop=True)
 
+    st.markdown("### Leaders (by sector)")
     st.dataframe(
-        ldf.style.format({
+        leaders_df.style.format({
             "RSI": "{:.1f}",
             f"RS({rs_short})": "{:.2%}",
             "Rotation": "{:.2%}",
+            "StrengthTrend": "{:+.0f}",
         }),
         use_container_width=True,
         hide_index=True,
         height=420
     )
 
+    # A+ detector
+    def _aplus_mask(df: pd.DataFrame) -> pd.Series:
+        m = (df["Strength"] >= float(aplus_strength))
+        if require_trend_up:
+            m = m & (df["Trend"] == "UP")
+        if require_rot_pos:
+            m = m & (df["Rotation"] > 0)
+        if use_rsi_pullback:
+            m = m & (df["RSI"] >= float(pb_low)) & (df["RSI"] <= float(pb_high))
+        return m
+
+    aplus = ldf_sorted[_aplus_mask(ldf_sorted)].copy()
+    aplus = aplus.sort_values(["Strength","StrengthTrend","Rotation"], ascending=[False, False, False]).head(15)
+
+    st.markdown("### ⭐ Top 15 A+ Leaders (market-wide, from scanned sectors)")
+    if aplus.empty:
+        st.info("No A+ leaders under current rules. Try lowering Min Strength or widening RSI window.")
+    else:
+        st.dataframe(
+            aplus.style.format({
+                "RSI": "{:.1f}",
+                f"RS({rs_short})": "{:.2%}",
+                "Rotation": "{:.2%}",
+                "StrengthTrend": "{:+.0f}",
+            }),
+            use_container_width=True,
+            hide_index=True,
+            height=420
+        )
+
+    # ======================
+    # Chart viewer
+    # ======================
     st.markdown("### 📈 Chart Viewer")
-    pick = st.selectbox("View chart for:", ldf["Ticker"].tolist(), index=0)
+    chart_list = []
+    if not aplus.empty:
+        chart_list = aplus["Ticker"].tolist()
+    elif not leaders_df.empty:
+        chart_list = leaders_df["Ticker"].tolist()
+    else:
+        chart_list = ldf_sorted["Ticker"].tolist()
+
+    pick = st.selectbox("View chart for:", chart_list, index=0)
     bars = get_hist(pick)
     if bars.empty:
         st.warning("No data for that ticker.")
@@ -257,3 +329,7 @@ def rsi_dashboard_main():
     fig.update_layout(height=520, xaxis_rangeslider_visible=False, title=f"{pick} — Daily Candles")
     st.plotly_chart(fig, use_container_width=True)
 
+    st.caption(
+        "StrengthTrend = Strength(today) − Strength(~1 week ago). "
+        "A+ Leaders are filtered by your rules, then ranked by Strength, StrengthTrend, and Rotation."
+    )
