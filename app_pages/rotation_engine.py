@@ -155,4 +155,151 @@ def compute_rotation_score(sym_close: pd.Series, sym_vol: pd.Series,
     total = float(rs_score + mom_score + pull_score + vol_score + breadth_score)
     return {
         "total": total,
-        "rs
+        "rs_score": rs_score,
+        "mom_score": mom_score,
+        "pull_score": pull_score,
+        "vol_score": vol_score,
+        "breadth_score": breadth_score,
+        "rs_trend_raw": float(rs_trend_raw),
+        "rsi": r_now,
+        "vol_ratio": float(vol_ratio),
+    }
+
+def sector_breadth_score(basket_closes: dict) -> float:
+    """
+    Breadth = % of basket above 50EMA AND 21EMA rising over last week
+    Returns 0..20
+    """
+    if not basket_closes:
+        return 10.0
+
+    hits = 0
+    total = 0
+    for _, c in basket_closes.items():
+        c = c.dropna()
+        if len(c) < 80:
+            continue
+        e50 = ema(c, 50)
+        e21 = ema(c, 21)
+        ok = (c.iloc[-1] > e50.iloc[-1]) and (e21.iloc[-1] > e21.iloc[-6])
+        total += 1
+        hits += int(ok)
+
+    if total == 0:
+        return 10.0
+
+    pct = hits / total
+    return float(20.0 * pct)
+
+def build_sector_rotation_table(period="9mo"):
+    sectors = list(SECTOR_ETFS.keys())
+    etfs = [SECTOR_ETFS[s] for s in sectors]
+    symbols = [BENCHMARK] + etfs
+
+    data = fetch_close_volume(symbols, period=period, interval="1d")
+    closes = data["Close"]
+    vols = data["Volume"]
+
+    bench_close = closes[BENCHMARK].dropna()
+
+    rows = []
+    for sector, etf in SECTOR_ETFS.items():
+        if etf not in closes.columns:
+            continue
+
+        sym_close = closes[etf].dropna()
+        sym_vol = vols[etf].dropna()
+
+        base = compute_rotation_score(sym_close, sym_vol, bench_close)
+
+        basket = SECTOR_BREADTH_BASKETS.get(sector, [])
+        basket_closes = {}
+        if basket:
+            bdata = fetch_close_volume(basket, period=period, interval="1d")
+            bclose = bdata["Close"]
+            for t in basket:
+                if t in bclose.columns:
+                    basket_closes[t] = bclose[t]
+
+        breadth = sector_breadth_score(basket_closes)
+
+        # Replace neutral breadth with real breadth
+        total = (base["total"] - base["breadth_score"]) + breadth
+
+        # Acceleration = score today - score 5 trading days ago
+        accel = np.nan
+        if len(sym_close) > 60 and len(bench_close) > 60:
+            base_ago = compute_rotation_score(sym_close.iloc[:-5], sym_vol.iloc[:-5], bench_close.iloc[:-5])
+            total_ago = (base_ago["total"] - base_ago["breadth_score"]) + breadth
+            accel = total - total_ago
+
+        rows.append({
+            "Sector": sector,
+            "ETF": etf,
+            "Rotation Score": round(total, 1),
+            "Accel (1w)": round(float(accel), 1) if pd.notna(accel) else np.nan,
+            "Breadth (0-20)": round(breadth, 1),
+        })
+
+    df = pd.DataFrame(rows).sort_values(["Rotation Score", "Accel (1w)"], ascending=False).reset_index(drop=True)
+    return df
+
+# =========================
+# WATCHLIST + EARLY BREAKOUTS
+# =========================
+def compute_early_breakout_score(close: pd.Series, vol: pd.Series, bench_close: pd.Series) -> dict:
+    df = pd.DataFrame({"c": close, "v": vol, "b": bench_close}).dropna()
+    if len(df) < 90:
+        return {"breakout_score": np.nan}
+
+    c = df["c"]; v = df["v"]; b = df["b"]
+
+    # RS improvement (0-25)
+    rs20 = (c.pct_change(20) - b.pct_change(20)) * 100
+    rs_tr = float(rs20.iloc[-1] - rs20.iloc[-6])
+    s_rs = score_0_20(rs_tr, lo=-2.0, hi=2.0) * 1.25
+
+    # EMA alignment (0-20)
+    e21 = ema(c, 21)
+    ema_ok = (c.iloc[-1] > e21.iloc[-1]) and (e21.iloc[-1] > e21.iloc[-6])
+    s_ema = 20.0 if ema_ok else 0.0
+
+    # Compression (0-20): ATR% down vs 10 days ago
+    a = atr_pct(c, 14)
+    comp = float(a.iloc[-11] - a.iloc[-1])
+    s_comp = score_0_20(comp, lo=-0.002, hi=0.002)
+
+    # Up-volume dominance (0-20)
+    rets = c.pct_change()
+    recent = pd.DataFrame({"ret": rets, "vol": v}).dropna().tail(20)
+    up = recent.loc[recent["ret"] > 0, "vol"].mean()
+    dn = recent.loc[recent["ret"] < 0, "vol"].mean()
+    vr = 1.0 if (np.isnan(up) or np.isnan(dn) or dn == 0) else float(up / dn)
+    s_vol = score_0_20(vr, lo=0.85, hi=1.35)
+
+    # Near resistance (0-15): within 1.5% of 20d high but not above
+    hi20 = float(c.rolling(20).max().iloc[-1])
+    dist = float((hi20 - c.iloc[-1]) / hi20)
+    near = (0 <= dist <= 0.015)
+    s_res = 15.0 if near else 0.0
+
+    total = float(s_rs + s_ema + s_comp + s_vol + s_res)
+    return {
+        "breakout_score": round(total, 1),
+        "rs_trend": round(rs_tr, 2),
+        "vol_ratio": round(vr, 2),
+        "compression": round(comp, 4),
+        "near_20d_high": bool(near),
+    }
+
+def build_rotation_watchlist(sector_threshold=70, top_sectors=6, period="9mo"):
+    sector_df = build_sector_rotation_table(period=period)
+    leaders = sector_df[sector_df["Rotation Score"] >= sector_threshold].head(top_sectors)
+    sectors = leaders["Sector"].tolist()
+
+    tickers = []
+    for s in sectors:
+        tickers += SECTOR_BREADTH_BASKETS.get(s, [])
+    tickers = sorted(list(set(tickers)))
+
+    return leaders, tickers
